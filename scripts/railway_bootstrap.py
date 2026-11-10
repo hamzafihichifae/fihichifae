@@ -120,13 +120,21 @@ class RailwayError(RuntimeError):
     pass
 
 
-def gql(query, variables=None, project_token=None):
-    token = project_token or os.environ["RAILWAY_API_TOKEN"]
+# Credential used for every API call, chosen by find_project():
+# ("account", token) -> Authorization: Bearer, ("project", token) -> Project-Access-Token
+AUTH = {"kind": "account", "token": ""}
+
+
+def gql(query, variables=None, project_token=None, account_token=None):
     headers = {"Content-Type": "application/json", "User-Agent": "fihi-chifae-bootstrap"}
     if project_token:
-        headers["Project-Access-Token"] = token
+        headers["Project-Access-Token"] = project_token
+    elif account_token:
+        headers["Authorization"] = "Bearer " + account_token
+    elif AUTH["kind"] == "project":
+        headers["Project-Access-Token"] = AUTH["token"]
     else:
-        headers["Authorization"] = "Bearer " + token
+        headers["Authorization"] = "Bearer " + AUTH["token"]
     body = json.dumps({"query": query, "variables": variables or {}}).encode()
     for attempt in range(4):
         req = urllib.request.Request(API, data=body, headers=headers)
@@ -148,11 +156,87 @@ def log(msg):
     print(msg, flush=True)
 
 
+def _as_project_token(token):
+    try:
+        d = gql("{ projectToken { projectId environmentId } }", project_token=token)
+    except RailwayError:
+        return None
+    return d["projectToken"]["projectId"], d["projectToken"]["environmentId"]
+
+
+def _projects_of(token):
+    """Projects an account / workspace token can see: [(id, name, {env name: id})]."""
+    node = "id name environments { edges { node { id name } } }"
+    found = {}
+    queries = [
+        "{ me { workspaces { projects(first: 100) { edges { node { " + node + " } } } } } }",
+        "{ projects(first: 100) { edges { node { " + node + " } } } }",
+    ]
+    for q in queries:
+        try:
+            d = gql(q, account_token=token)
+        except RailwayError:
+            continue
+        conns = [w["projects"] for w in d["me"]["workspaces"]] if "me" in d else [d["projects"]]
+        for conn in conns:
+            for e in conn["edges"]:
+                n = e["node"]
+                envs = {x["node"]["name"]: x["node"]["id"] for x in n["environments"]["edges"]}
+                found[n["id"]] = (n["id"], n["name"], envs)
+    return list(found.values())
+
+
 def find_project():
-    data = gql(
-        "{ projectToken { projectId environmentId } }", project_token=os.environ["RAILWAY_TOKEN"]
-    )
-    return data["projectToken"]["projectId"], data["projectToken"]["environmentId"]
+    """Find the project and environment from whichever secrets were given.
+
+    Works whether RAILWAY_TOKEN / RAILWAY_API_TOKEN hold a project token, an
+    account token or a workspace token, or were swapped. Returns
+    (project_id, env_id, cli) where cli = (env var, token) for the Railway CLI.
+    """
+    secrets_given = [
+        (name, os.environ[name])
+        for name in ("RAILWAY_TOKEN", "RAILWAY_API_TOKEN")
+        if os.environ.get(name)
+    ]
+    project_hit = None  # (secret name, token, (project id, env id))
+    accounts = []  # (secret name, token, projects it can see)
+    for name, tok in secrets_given:
+        hit = _as_project_token(tok)
+        if hit:
+            project_hit = project_hit or (name, tok, hit)
+            continue
+        projects = _projects_of(tok)
+        if projects:
+            accounts.append((name, tok, projects))
+        else:
+            log(f"! secret {name} is not a valid Railway token (ignored)")
+
+    if project_hit:
+        name, tok, (pid, eid) = project_hit
+        if accounts:  # an account token can do everything; prefer it for the API
+            AUTH.update(kind="account", token=accounts[0][1])
+        else:
+            AUTH.update(kind="project", token=tok)
+        log(f"project found from the project token in {name}")
+        return pid, eid, ("project", name)
+
+    if not accounts:
+        raise RailwayError(
+            "neither secret is a valid Railway token: create a project token "
+            "(Railway project -> Settings -> Tokens) and put it in RAILWAY_TOKEN"
+        )
+    name, account, projects = accounts[0]
+    if len(projects) > 1:
+        ours = [p for p in projects if "fihi" in p[1].lower()]
+        projects = ours if len(ours) == 1 else projects
+    if len(projects) > 1:
+        names = ", ".join(p[1] for p in projects)
+        raise RailwayError(f"several Railway projects ({names}): keep one, or add a project token")
+    pid, pname, envs = projects[0]
+    eid = envs.get("production") or next(iter(envs.values()))
+    AUTH.update(kind="account", token=account)
+    log(f"project '{pname}' found from the account token in {name}")
+    return pid, eid, ("account", name)
 
 
 def load_state(project_id, env_id):
@@ -297,13 +381,12 @@ def to_deploy(services, status, changed):
 
 
 def main():
-    for var in ("RAILWAY_TOKEN", "RAILWAY_API_TOKEN"):
-        if not os.environ.get(var):
-            sys.exit(f"::error::missing secret {var} (repo Settings -> Secrets -> Actions)")
+    if not (os.environ.get("RAILWAY_TOKEN") or os.environ.get("RAILWAY_API_TOKEN")):
+        sys.exit("::error::add the RAILWAY_TOKEN secret (repo Settings -> Secrets -> Actions)")
     raw = os.environ.get("CHANGED_FILES", "ALL").strip()
     changed = "ALL" if raw == "ALL" else [line.strip() for line in raw.splitlines() if line.strip()]
 
-    project_id, env_id = find_project()
+    project_id, env_id, (cli_kind, cli_secret) = find_project()
     services, status, volumes = load_state(project_id, env_id)
     ensure_services(project_id, env_id, services, volumes)
     ensure_volumes(project_id, env_id, services, volumes)
@@ -317,7 +400,16 @@ def main():
     if out:
         with open(out, "a", encoding="utf-8") as fh:
             fh.write(f"deploy={' '.join(deploy)}\nurl={url}\n")
+            # which secret the CLI must use (the name only, never the value)
+            fh.write(
+                f"cli_kind={cli_kind}\ncli_secret={cli_secret}\n"
+                f"project_id={project_id}\nenvironment_id={env_id}\n"
+            )
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RailwayError as exc:  # shown as an annotation on the run page
+        print(f"::error title=Railway setup failed::{exc}", flush=True)
+        sys.exit(1)
