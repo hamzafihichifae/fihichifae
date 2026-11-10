@@ -53,6 +53,16 @@ changed), the job waits until the shop answers and shows its URL on the run page
 * secret **`RAILWAY_API_TOKEN`**: Railway → *Account Settings → Tokens* (account
   token; also used by the daily cost check).
 
+**Own domain (`fihichifae.com`, Cloudflare)**: the setup step attaches
+`fihichifae.com` and `www.fihichifae.com` to `frontend` and writes the DNS
+records Railway asks for into Cloudflare (CNAME to the Railway domain + the
+`_railway-verify` TXT, *DNS only* so Railway issues the HTTPS certificate).
+Needs the repo secret **`CLOUDFLARE_API_TOKEN`** (Cloudflare → My Profile → API
+Tokens → template *Edit zone DNS*, zone `fihichifae.com`); without it the run
+page lists the records to add by hand. Another domain: set `FIHI_DOMAIN` in the
+script's environment. `FIHI_PUBLIC_BASE_URL` follows it, and stored image URLs
+are rewritten at the next backend start. The `*.up.railway.app` address keeps working.
+
 **Admin login**: `<shop URL>/admin-login.html`, user `admin`, password in
 Railway → `backend` → *Variables* → `FIHI_ADMIN_PASSWORD`. The admin's
 username, password, reset e-mail and WhatsApp number are then changed from the

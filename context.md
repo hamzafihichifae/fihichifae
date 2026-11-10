@@ -16,3 +16,4 @@ signs the other sessions out. Values live in the meta table.
 Orders: customer filter (buyer name), current month by default; "all periods" -> whole history + summary.
 Sizes: units g / kg / L; id "250g", shown "250 g" (value then unit, dir=ltr) in every language.
 Tests: real MySQL / Garage / Meilisearch from .env; every test deletes what it creates (tests/conftest.py).
+Domain: fihichifae.com + www on frontend; Cloudflare DNS (DNS only) written by railway_bootstrap.py with CLOUDFLARE_API_TOKEN.

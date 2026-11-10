@@ -263,6 +263,7 @@ jobs:
           # project token for the Railway CLI (temporary one when only an
           # account/workspace token was given); never printed
           DEPLOY_TOKEN_FILE: ${{ runner.temp }}/railway-deploy-token
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: python scripts/railway_bootstrap.py
       - uses: actions/setup-node@v4
         with:
@@ -286,21 +287,36 @@ jobs:
       - name: Wait until the shop answers
         env:
           URL: ${{ steps.bootstrap.outputs.url }}
+          CUSTOM_URL: ${{ steps.bootstrap.outputs.custom_url }}
         run: |
+          up() { curl -fsS --max-time 10 "$1/healthz" >/dev/null && curl -fsS --max-time 10 "$1/api/v1/ping" >/dev/null; }
+          ok=""
           for i in $(seq 1 90); do
-            if curl -fsS "$URL/healthz" >/dev/null && curl -fsS "$URL/api/v1/ping" >/dev/null; then
-              echo "shop is up: $URL"
-              {
-                echo "## Shop deployed"
-                echo ""
-                echo "**$URL** (admin: $URL/admin-login.html, user \`admin\`)"
-                echo ""
-                echo "Admin password: Railway → backend → Variables → \`FIHI_ADMIN_PASSWORD\`"
-                echo "(change it from the dashboard's profile panel)."
-              } >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
+            if up "$URL"; then ok=1; break; fi
             sleep 10
           done
-          echo "::error::$URL did not answer within 15 minutes: check the backend / frontend logs in Railway"
-          exit 1
+          if [ -z "$ok" ]; then
+            echo "::error::$URL did not answer within 15 minutes: check the backend / frontend logs in Railway"
+            exit 1
+          fi
+          echo "shop is up: $URL"
+          main="$URL"
+          if [ -n "$CUSTOM_URL" ]; then
+            # first time: DNS + HTTPS certificate can take a few minutes
+            for i in $(seq 1 60); do
+              if up "$CUSTOM_URL"; then main="$CUSTOM_URL"; break; fi
+              sleep 10
+            done
+            if [ "$main" = "$URL" ]; then
+              echo "::warning::$CUSTOM_URL is not answering yet (DNS / certificate still in progress); the shop works on $URL"
+            fi
+          fi
+          {
+            echo "## Shop deployed"
+            echo ""
+            echo "**$main** (admin: $main/admin-login.html, user \`admin\`)"
+            [ "$main" != "$URL" ] && echo "" && echo "Also reachable at $URL"
+            echo ""
+            echo "Admin password: Railway → backend → Variables → \`FIHI_ADMIN_PASSWORD\`"
+            echo "(change it from the dashboard's profile panel)."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -68,6 +68,9 @@ SERVICES = {
 ORDER = ["mysql", "storage", "search", "backend", "frontend"]
 INFRA = {"mysql", "storage", "search"}
 FRONTEND_PORT = 8080
+# The shop's own domain (its Cloudflare zone); the first one is the main address.
+ZONE = os.environ.get("FIHI_DOMAIN", "fihichifae.com")
+CUSTOM_DOMAINS = [ZONE, "www." + ZONE] if ZONE else []
 
 
 def _secret(nbytes):
@@ -88,7 +91,9 @@ FIXED = {
         "PORT": "8000",
         "FIHI_ADMIN_USER": "admin",
         "FIHI_WHATSAPP_NUMBER": "212681771457",
-        "FIHI_PUBLIC_BASE_URL": "https://${{frontend.RAILWAY_PUBLIC_DOMAIN}}",
+        "FIHI_PUBLIC_BASE_URL": (
+            "https://" + ZONE if ZONE else "https://${{frontend.RAILWAY_PUBLIC_DOMAIN}}"
+        ),
         "FIHI_MYSQL_HOST": "${{mysql.RAILWAY_PRIVATE_DOMAIN}}",
         "FIHI_MYSQL_PORT": "3306",
         "FIHI_MYSQL_DATABASE": "${{mysql.MYSQL_DATABASE}}",
@@ -368,12 +373,12 @@ def ensure_variables(project_id, env_id, services):
 
 
 def ensure_domain(project_id, env_id, services):
+    """The Railway-provided domain (*.up.railway.app) on the frontend."""
     sid = services["frontend"]
     q = """query($p:String!,$e:String!,$s:String!){
-      domains(projectId:$p, environmentId:$e, serviceId:$s){
-        serviceDomains { domain } customDomains { domain } } }"""
-    d = gql(q, {"p": project_id, "e": env_id, "s": sid})["domains"]
-    names = [x["domain"] for x in d["customDomains"] + d["serviceDomains"]]
+      domains(projectId:$p, environmentId:$e, serviceId:$s){ serviceDomains { domain } } }"""
+    found = gql(q, {"p": project_id, "e": env_id, "s": sid})["domains"]["serviceDomains"]
+    names = [x["domain"] for x in found]
     if not names:
         data = gql(
             "mutation($i:ServiceDomainCreateInput!){ serviceDomainCreate(input:$i){ domain } }",
@@ -382,6 +387,116 @@ def ensure_domain(project_id, env_id, services):
         names = [data["serviceDomainCreate"]["domain"]]
         log(f"+ public domain {names[0]}")
     return "https://" + names[0]
+
+
+# ---------------------------------------------------------------- custom domain
+CF_API = "https://api.cloudflare.com/client/v4"
+_CUSTOM_STATUS = """status { verified verificationDnsHost verificationToken certificateStatus
+  dnsRecords { fqdn hostlabel zone recordType requiredValue currentValue status } }"""
+
+
+def cloudflare(method, path, payload=None):
+    req = urllib.request.Request(  # noqa: S310 - fixed https URL
+        CF_API + path,
+        method=method,
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={
+            "Authorization": "Bearer " + os.environ["CLOUDFLARE_API_TOKEN"],
+            "Content-Type": "application/json",
+            "User-Agent": "fihi-chifae-bootstrap",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed https URL
+            data = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        data = json.loads(exc.read() or b"{}")
+    if not data.get("success"):
+        raise RailwayError(f"Cloudflare {method} {path}: {data.get('errors')}")
+    return data["result"]
+
+
+def wanted_records(domain_status, zone):
+    """[(type, fqdn, value)] that Railway needs for one custom domain."""
+    out = []
+    for r in domain_status.get("dnsRecords") or []:
+        rtype = (r.get("recordType") or "").replace("DNS_RECORD_TYPE_", "")
+        if rtype in ("CNAME", "A", "TXT") and r.get("requiredValue"):
+            fqdn = r.get("fqdn") or ".".join(x for x in (r.get("hostlabel"), zone) if x)
+            out.append((rtype, fqdn.rstrip("."), r["requiredValue"]))
+    host = domain_status.get("verificationDnsHost")
+    token = domain_status.get("verificationToken")
+    if host and token and not domain_status.get("verified"):
+        fqdn = host.rstrip(".")
+        if not fqdn.endswith(zone):
+            fqdn = f"{fqdn}.{zone}"
+        out.append(("TXT", fqdn, token))
+    return out
+
+
+def upsert_cloudflare_records(zone, records):
+    """Create / correct the records; leaves unrelated records alone."""
+    zones = cloudflare("GET", f"/zones?name={zone}")
+    if not zones:
+        raise RailwayError(f"the Cloudflare token cannot see the zone {zone}")
+    zid = zones[0]["id"]
+    for rtype, fqdn, value in records:
+        existing = cloudflare("GET", f"/zones/{zid}/dns_records?name={fqdn}&per_page=100")
+        if rtype == "CNAME":
+            # a name holding a CNAME can hold nothing else that routes traffic
+            in_the_way = [r for r in existing if r["type"] in ("A", "AAAA", "CNAME")]
+        else:
+            in_the_way = [
+                r for r in existing if r["type"] == rtype and r["content"].strip('"') == value
+            ]
+        if any(r["type"] == rtype and r["content"].strip('"') == value for r in in_the_way):
+            continue  # already right
+        body = {"type": rtype, "name": fqdn, "content": value, "ttl": 1}
+        if rtype in ("CNAME", "A"):
+            body["proxied"] = False  # DNS only: Railway issues the HTTPS certificate
+        for r in in_the_way:
+            cloudflare("DELETE", f"/zones/{zid}/dns_records/{r['id']}")
+        cloudflare("POST", f"/zones/{zid}/dns_records", body)
+        log(f"~ Cloudflare {rtype} {fqdn} -> {value[:48]}")
+
+
+def ensure_custom_domains(project_id, env_id, services):
+    """Attach CUSTOM_DOMAINS to the frontend and point the Cloudflare DNS at it."""
+    if not CUSTOM_DOMAINS:
+        return ""
+    sid = services["frontend"]
+    q = (
+        "query($p:String!,$e:String!,$s:String!){"
+        " domains(projectId:$p, environmentId:$e, serviceId:$s){"
+        " customDomains { domain " + _CUSTOM_STATUS + " } } }"
+    )
+    found = gql(q, {"p": project_id, "e": env_id, "s": sid})["domains"]["customDomains"]
+    current = {d["domain"]: d for d in found}
+    records = []
+    for domain in CUSTOM_DOMAINS:
+        if domain not in current:
+            current[domain] = gql(
+                "mutation($i:CustomDomainCreateInput!){ customDomainCreate(input:$i){ domain "
+                + _CUSTOM_STATUS
+                + " } }",
+                {
+                    "i": {
+                        "domain": domain,
+                        "projectId": project_id,
+                        "environmentId": env_id,
+                        "serviceId": sid,
+                        "targetPort": FRONTEND_PORT,
+                    }
+                },
+            )["customDomainCreate"]
+            log(f"+ custom domain {domain} on 'frontend'")
+        records += wanted_records(current[domain].get("status") or {}, ZONE)
+    if os.environ.get("CLOUDFLARE_API_TOKEN"):
+        upsert_cloudflare_records(ZONE, records)
+    elif records:
+        lines = "%0A".join(f"{t} {n} -> {v}" for t, n, v in records)
+        print(f"::warning title=Add these DNS records in Cloudflare (DNS only)::{lines}")
+    return "https://" + CUSTOM_DOMAINS[0]
 
 
 def to_deploy(services, status, changed):
@@ -446,6 +561,7 @@ def main():
     ensure_volumes(project_id, env_id, services, volumes)
     ensure_variables(project_id, env_id, services)
     url = ensure_domain(project_id, env_id, services)
+    custom_url = ensure_custom_domains(project_id, env_id, services)
     deploy = to_deploy(services, status, changed)
 
     token_file = os.environ.get("DEPLOY_TOKEN_FILE")
@@ -463,7 +579,7 @@ def main():
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
         with open(out, "a", encoding="utf-8") as fh:
-            fh.write(f"deploy={' '.join(deploy)}\nurl={url}\n")
+            fh.write(f"deploy={' '.join(deploy)}\nurl={url}\ncustom_url={custom_url}\n")
 
 
 if __name__ == "__main__":
