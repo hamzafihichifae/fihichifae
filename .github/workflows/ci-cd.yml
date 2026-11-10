@@ -1,12 +1,13 @@
-name: CI/CD — test, secure, build, performance, deploy (manual)
+name: CI/CD — test, secure, build, performance, deploy
 
 # Every push / PR: lint, tests (against real MySQL + Garage + Meilisearch),
 # security scans and the five deployable Docker images.
-# Push to main: + performance (load) test of the whole stack, downloadable report.
-# "Run workflow" (Actions tab): choose a performance test and/or a Railway deploy.
-# Deployment ONLY happens when you ask for it; data lives on the services'
-# volumes (MySQL, storage, search), so a deploy never touches it.
-# Railway costs are checked daily by a separate workflow (railway-usage.yml).
+# Push to main: + automatic deploy to Railway once lint/tests/security pass
+# (scripts/railway_bootstrap.py creates whatever is missing in the Railway
+# project: services, volumes, variables, secrets, public domain), and a
+# performance (load) test of the whole stack, downloadable report.
+# Data lives on the services' volumes (MySQL, storage, search): a deploy never
+# touches it. Railway costs are checked daily by railway-usage.yml.
 on:
   push:
     branches: [main, master]
@@ -14,14 +15,6 @@ on:
     branches: [main, master]
   workflow_dispatch:
     inputs:
-      deploy:
-        description: "Deploy to Railway"
-        type: boolean
-        default: false
-      services:
-        description: "Railway services to deploy (comma separated)"
-        type: string
-        default: "backend,frontend"
       run_perf:
         description: "Run the performance (load) test"
         type: boolean
@@ -228,35 +221,74 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-  # ─────────────────────────── manual deployment ───────────────────────────
+  # ───────────────────────── automatic deployment ─────────────────────────
   deploy-railway:
     name: Deploy → Railway
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
     needs: [lint-test, security]
     runs-on: ubuntu-latest
     environment: production
+    concurrency:
+      group: railway-deploy
+      cancel-in-progress: false
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Files changed by this push
+        id: changes
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          {
+            echo "files<<EOF"
+            if [ "${{ github.event_name }}" = "push" ]; then
+              git diff --name-only "$BEFORE" "$GITHUB_SHA" 2>/dev/null || echo ALL
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Prepare the Railway project (services, volumes, variables, domain)
+        id: bootstrap
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          CHANGED_FILES: ${{ steps.changes.outputs.files }}
+        run: python scripts/railway_bootstrap.py
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Deploy each service with the Railway CLI (volumes are kept)
+      - name: Deploy (${{ steps.bootstrap.outputs.deploy }})
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          SERVICES: ${{ inputs.services }}
         run: |
-          if [ -z "$RAILWAY_TOKEN" ]; then
-            echo "::error::Set the RAILWAY_TOKEN secret (see deployment-guide.md)"
-            exit 1
-          fi
           npm install -g @railway/cli
           # each service is uploaded with its own railway.json (see the script)
-          bash scripts/railway_deploy.sh ${SERVICES//,/ }
-      - name: Smoke test
-        if: vars.PUBLIC_URL != ''
+          bash scripts/railway_deploy.sh ${{ steps.bootstrap.outputs.deploy }}
+      - name: Wait until the shop answers
+        env:
+          URL: ${{ steps.bootstrap.outputs.url }}
         run: |
-          for i in $(seq 1 30); do
-            curl -fsS "${{ vars.PUBLIC_URL }}/api/v1/ping" && curl -fsS "${{ vars.PUBLIC_URL }}/healthz" && exit 0
+          for i in $(seq 1 90); do
+            if curl -fsS "$URL/healthz" >/dev/null && curl -fsS "$URL/api/v1/ping" >/dev/null; then
+              echo "shop is up: $URL"
+              {
+                echo "## Shop deployed"
+                echo ""
+                echo "**$URL** (admin: $URL/admin-login.html, user \`admin\`)"
+                echo ""
+                echo "Admin password: Railway → backend → Variables → \`FIHI_ADMIN_PASSWORD\`"
+                echo "(change it from the dashboard's profile panel)."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
             sleep 10
           done
+          echo "::error::$URL did not answer within 15 minutes: check the backend / frontend logs in Railway"
           exit 1

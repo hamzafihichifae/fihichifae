@@ -28,65 +28,43 @@ Search index note: Meilisearch only holds a **copy** of the catalog. The backend
 rebuilds it at start-up and after every catalog change, and if `search` is down
 the storefront falls back to a built-in search — losing that volume loses nothing.
 
-## One-time setup on Railway
+## Deploying (automatic)
 
-1. **Create the five services** from this GitHub repo (*New → GitHub repo*, five
-   times), named exactly `frontend`, `backend`, `mysql`, `storage`, `search`
-   (no `fluentd` on Railway: it is a local-development tool). In each service → *Settings → Config-as-code*, set the file:
+**Every push to `main` deploys**, once lint, tests and security checks pass
+(GitHub → Actions → "CI/CD" → job *Deploy → Railway*). Nothing is set up by
+hand in Railway: before each deploy, `scripts/railway_bootstrap.py` makes the
+project match what the shop needs, adding only what is missing:
 
-   | Service | Config file |
-   |---|---|
-   | backend | `railway.json` |
-   | frontend | `deploy/frontend/railway.json` |
-   | mysql | `deploy/mysql/railway.json` |
-   | storage | `deploy/garage/railway.json` |
-   | search | `deploy/search/railway.json` |
+| Step | What it does |
+|---|---|
+| services | creates `mysql`, `storage`, `search`, `backend`, `frontend`, each building its own `Dockerfile` / `railway.json`; removes other services **that have no volume** (e.g. the one Railway creates when a repo is linked) |
+| volumes | `mysql` → `/var/lib/mysql`, `storage` → `/var/lib/garage`, `search` → `/meili_data` |
+| variables | fixed values (hosts, ports, database / bucket names, admin user, WhatsApp number) are kept in sync; services find each other through Railway references (`${{mysql.MYSQL_PASSWORD}}`, `*.railway.internal`) |
+| secrets | MySQL passwords, Garage keys, Meilisearch key and the admin password are generated **once** and stored only in Railway (never in the repo or the logs) |
+| domain | public domain on `frontend` only; every other service stays private |
 
-2. **Volumes** (service → *Settings → Volumes*): `mysql` → `/var/lib/mysql`,
-   `storage` → `/var/lib/garage`, `search` → `/meili_data`.
-3. **Secrets** — generate once (`openssl rand -hex 32` / `-hex 16` / `-hex 12`):
+Then `scripts/railway_deploy.sh` deploys `backend` + `frontend` (and `mysql`,
+`storage`, `search` on the first deploy or when their `deploy/<folder>/`
+changed), the job waits until the shop answers and shows its URL on the run page.
 
-   | Variable | Set on | Value |
-   |---|---|---|
-   | `MYSQL_ROOT_PASSWORD` | mysql | random |
-   | `MYSQL_DATABASE` / `MYSQL_USER` / `MYSQL_PASSWORD` | mysql | `fihi` / `fihi` / random |
-   | `FIHI_MYSQL_HOST` | backend | `mysql.railway.internal` |
-   | `FIHI_MYSQL_DATABASE` / `FIHI_MYSQL_USER` / `FIHI_MYSQL_PASSWORD` | backend | same as on mysql |
-   | `GARAGE_RPC_SECRET` | storage | `openssl rand -hex 32` |
-   | `GARAGE_ACCESS_KEY` | storage | `GK` + `openssl rand -hex 12` |
-   | `GARAGE_SECRET_KEY` | storage | `openssl rand -hex 32` |
-   | `FIHI_S3_ENDPOINT` | backend | `http://storage.railway.internal:3900` |
-   | `FIHI_S3_ACCESS_KEY` / `FIHI_S3_SECRET_KEY` | backend | same as `GARAGE_ACCESS_KEY` / `GARAGE_SECRET_KEY` |
-   | `MEILI_MASTER_KEY` | search | `openssl rand -hex 16` |
-   | `FIHI_MEILI_URL` / `FIHI_MEILI_KEY` | backend | `http://search.railway.internal:7700` / same key |
-   | `FIHI_ADMIN_PASSWORD` | backend | a long passphrase (only used if no admin exists yet) |
-   | `FIHI_PUBLIC_BASE_URL` | backend | the frontend's public URL (reset links + image URLs) |
-   | `FIHI_SMTP_*`, `FIHI_EMAIL_FROM` | backend | optional, to e-mail reset links |
-   | `BACKEND_HOST` | frontend | `backend.railway.internal` |
-   | `STORAGE_HOST` | frontend | `storage.railway.internal` |
-   | `NGINX_RESOLVER` | frontend | `[fd12::10]` (Railway's private DNS) |
+**Only two things are needed, once** (repo → *Settings → Secrets and variables → Actions*):
 
-   Railway's references (`${{mysql.MYSQL_PASSWORD}}`) avoid copying values twice.
-4. **Networking**: *Generate domain* on **`frontend` only**. Every other service
-   stays on the private network.
-5. To deploy **only when you decide**, turn off *Settings → Deploy → automatic
-   deploys* on each service and use the workflow below (or `railway up`).
+* secret **`RAILWAY_TOKEN`**: Railway project → *Settings → Tokens* (project token);
+* secret **`RAILWAY_API_TOKEN`**: Railway → *Account Settings → Tokens* (account
+  token; also used by the daily cost check).
 
-The admin's username, password, reset e-mail and WhatsApp number are changed
-from the dashboard (avatar circle → الملف الشخصي). `FIHI_ADMIN_*` and
+**Admin login**: `<shop URL>/admin-login.html`, user `admin`, password in
+Railway → `backend` → *Variables* → `FIHI_ADMIN_PASSWORD`. The admin's
+username, password, reset e-mail and WhatsApp number are then changed from the
+dashboard (avatar circle → الملف الشخصي); `FIHI_ADMIN_*` and
 `FIHI_WHATSAPP_NUMBER` only seed a brand-new database.
 
-## Releasing a new version (manual button)
+Optional, password-reset e-mails: add `FIHI_ADMIN_EMAIL`, `FIHI_SMTP_HOST`,
+`FIHI_SMTP_PORT`, `FIHI_SMTP_USER`, `FIHI_SMTP_PASSWORD`, `FIHI_EMAIL_FROM` on
+`backend` in Railway (without them the reset link is written to the backend logs).
 
-GitHub → **Actions → "CI/CD" → Run workflow → tick *Deploy to Railway***, list
-the services to deploy (default `backend,frontend`; add `mysql,storage,search`
-only when their folder under `deploy/` changed). The job runs lint + tests +
-security checks, then `railway up` per service. It needs:
-
-* secret **`RAILWAY_TOKEN`** — Railway project → *Settings → Tokens* (project token);
-* optional variable **`PUBLIC_URL`** (the frontend URL) for a post-deploy smoke test.
-
-From a terminal instead: `railway login && railway link && make deploy`.
+A manual run (*Actions → CI/CD → Run workflow*) deploys the current `main` too.
+From a terminal: `railway login && railway link && make deploy`.
 
 ## Logs
 
