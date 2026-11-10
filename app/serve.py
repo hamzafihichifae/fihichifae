@@ -492,7 +492,9 @@ class AppHandler(BaseHTTPRequestHandler):
         source = "chatbot" if payload.get("source") == "chatbot" else "online"
         result = orders.create_order(payload, manual=False, source=source)
         _order_throttle.record_failure(ip)  # counts placed orders, not failures
-        self._json(201, result)
+        # the shop's current WhatsApp number (set by the admin): the storefront
+        # sends the order there even if its settings were not loaded yet
+        self._json(201, dict(result, whatsapp=account.shop_phone()))
 
     def _h_newsletter(self, match):
         ip = self._client_ip()

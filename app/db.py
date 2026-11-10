@@ -506,8 +506,9 @@ def init_admin(conn):
         log.info("admin account created", extra={"user": config.DEFAULT_ADMIN_USER})
         _reset_admin_password(conn, "initial account")
     # initial values only: the admin edits them from the profile panel
-    if not get_meta(conn, "admin_email"):
-        set_meta(conn, "admin_email", config.DEFAULT_ADMIN_EMAIL)
+    stored_email = get_meta(conn, "admin_email") or ""
+    if not stored_email or stored_email.lower() in config.PLACEHOLDER_ADMIN_EMAILS:
+        set_meta(conn, "admin_email", config.DEFAULT_ADMIN_EMAIL.lower())
     if not get_meta(conn, "whatsapp"):
         set_meta(conn, "whatsapp", config.WHATSAPP_NUMBER)
 

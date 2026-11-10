@@ -529,6 +529,8 @@
         err.code = data.error && data.error.code;
         throw err;
       }
+      // the server answers with the admin's current number: always use it
+      if (data.whatsapp) applyPhone(data.whatsapp);
       const href = 'https://wa.me/' + WHATSAPP_NUMBER + '?text=' + encodeURIComponent(waMessage(data, c));
       if (win && !win.closed) win.location.href = href; else window.location.href = href;
       cart = [];

@@ -86,12 +86,18 @@ DEFAULT_ADMIN_PASS = os.environ.get("FIHI_ADMIN_PASSWORD", _DEFAULT_PASS)
 ADMIN_PASSWORD_FROM_ENV = "FIHI_ADMIN_PASSWORD" in os.environ
 # Initial address of the password-reset link; the admin changes it from the
 # profile panel afterwards (the stored value then wins).
-DEFAULT_ADMIN_EMAIL = os.environ.get("FIHI_ADMIN_EMAIL", "admin@fihi-chifae.com").strip()
+DEFAULT_ADMIN_EMAIL = os.environ.get("FIHI_ADMIN_EMAIL", "hamza.fihichifae@gmail.com").strip()
+# Placeholder stored by earlier releases: replaced by DEFAULT_ADMIN_EMAIL at start.
+PLACEHOLDER_ADMIN_EMAILS = ("admin@fihi-chifae.com",)
 
 # ---------------------------------------------------------------------------
-# SMTP configuration (used to deliver the password-reset e-mail).
-# Leave unset -> reset links are printed to the server console instead.
+# E-mail delivery (password-reset link). First match wins:
+#   1. Resend HTTPS API (FIHI_RESEND_API_KEY): works on every Railway plan
+#      (Railway blocks outbound SMTP below the Pro plan);
+#   2. SMTP (FIHI_SMTP_HOST + FIHI_EMAIL_FROM);
+#   3. nothing set -> the reset link is written to the server logs.
 # ---------------------------------------------------------------------------
+RESEND_API_KEY = os.environ.get("FIHI_RESEND_API_KEY", "").strip()
 SMTP_HOST = os.environ.get("FIHI_SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("FIHI_SMTP_PORT", "587") or 587)
 SMTP_USER = os.environ.get("FIHI_SMTP_USER", "")

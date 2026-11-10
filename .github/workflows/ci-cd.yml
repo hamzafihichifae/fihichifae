@@ -264,6 +264,7 @@ jobs:
           # account/workspace token was given); never printed
           DEPLOY_TOKEN_FILE: ${{ runner.temp }}/railway-deploy-token
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
         run: python scripts/railway_bootstrap.py
       - uses: actions/setup-node@v4
         with:

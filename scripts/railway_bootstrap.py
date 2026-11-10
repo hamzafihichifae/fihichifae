@@ -96,6 +96,9 @@ FIXED = {
         "PORT": "8000",
         "FIHI_ADMIN_USER": "admin",
         "FIHI_WHATSAPP_NUMBER": "212681771457",
+        # first reset address only (replaces the old placeholder); the admin
+        # changes it from the profile panel afterwards
+        "FIHI_ADMIN_EMAIL": "hamza.fihichifae@gmail.com",
         "FIHI_PUBLIC_BASE_URL": (
             "https://" + ZONE if ZONE else "https://${{frontend.RAILWAY_PUBLIC_DOMAIN}}"
         ),
@@ -445,7 +448,7 @@ def upsert_cloudflare_records(zone, records):
     if not zones:
         raise RailwayError(f"the Cloudflare token cannot see the zone {zone}")
     zid = zones[0]["id"]
-    for rtype, fqdn, value in records:
+    for rtype, fqdn, value, *extra in records:
         existing = cloudflare("GET", f"/zones/{zid}/dns_records?name={fqdn}&per_page=100")
         if rtype == "CNAME":
             # a name holding a CNAME can hold nothing else that routes traffic
@@ -459,10 +462,94 @@ def upsert_cloudflare_records(zone, records):
         body = {"type": rtype, "name": fqdn, "content": value, "ttl": 1}
         if rtype in ("CNAME", "A"):
             body["proxied"] = False  # DNS only: Railway issues the HTTPS certificate
+        if rtype == "MX":
+            body["priority"] = int(extra[0]) if extra else 10
         for r in in_the_way:
             cloudflare("DELETE", f"/zones/{zid}/dns_records/{r['id']}")
         cloudflare("POST", f"/zones/{zid}/dns_records", body)
         log(f"~ Cloudflare {rtype} {fqdn} -> {value[:48]}")
+
+
+# ---------------------------------------------------------------- e-mail (Resend)
+RESEND_API = "https://api.resend.com"
+SENDER = "Fihi Chifae <no-reply@{zone}>"
+
+
+def resend(method, path, payload=None):
+    req = urllib.request.Request(  # noqa: S310 - fixed https URL
+        RESEND_API + path,
+        method=method,
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={
+            "Authorization": "Bearer " + os.environ["RESEND_API_KEY"],
+            "Content-Type": "application/json",
+            "User-Agent": "fihi-chifae-bootstrap",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed https URL
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read()[:300].decode("utf-8", "replace")
+        raise RailwayError(f"Resend {method} {path}: HTTP {exc.code} {detail}") from exc
+
+
+def resend_records(domain):
+    """[(type, fqdn, value, priority)] Resend needs (SPF / DKIM / bounce MX)."""
+    out = []
+    for r in domain.get("records") or []:
+        name = (r.get("name") or "").rstrip(".")
+        fqdn = name if name == ZONE or name.endswith("." + ZONE) else f"{name}.{ZONE}"
+        if not name:
+            fqdn = ZONE
+        rtype = (r.get("type") or "").upper()
+        if rtype in ("MX", "TXT", "CNAME") and r.get("value"):
+            out.append((rtype, fqdn, r["value"], r.get("priority") or 10))
+    return out
+
+
+def ensure_email():
+    """Prepare the shop's e-mail sending. Returns the backend variables to set.
+
+    With RESEND_API_KEY: registers the shop domain at Resend, writes its DNS
+    records into Cloudflare and asks Resend to verify it. Until the domain is
+    verified, the backend sends from Resend's shared address (it only delivers
+    to the Resend account's own e-mail); once verified, from no-reply@<domain>.
+    """
+    key = os.environ.get("RESEND_API_KEY", "").strip()
+    if not key:
+        log("! no RESEND_API_KEY secret: reset links are only written to the backend logs")
+        return {}
+    env = {"FIHI_RESEND_API_KEY": key}
+    if not ZONE:
+        return env
+    try:
+        listed = resend("GET", "/domains").get("data") or []
+        found = next((d for d in listed if d.get("name") == ZONE), None)
+        if found is None:
+            found = resend("POST", "/domains", {"name": ZONE})
+            log(f"+ Resend domain {ZONE}")
+        domain = resend("GET", f"/domains/{found['id']}")
+    except RailwayError as exc:
+        # e.g. a "sending access" key cannot manage domains: still send, from
+        # Resend's shared address
+        print(f"::warning title=Resend domain not managed::{exc}", flush=True)
+        return env
+    if domain.get("status") == "verified":
+        env["FIHI_EMAIL_FROM"] = SENDER.format(zone=ZONE)
+        return env
+    records = resend_records(domain)
+    if os.environ.get("CLOUDFLARE_API_TOKEN"):
+        upsert_cloudflare_records(ZONE, records)
+    elif records:
+        lines = "%0A".join(f"{t} {n} -> {v}" for t, n, v, _p in records)
+        print(f"::warning title=Add these e-mail DNS records in Cloudflare::{lines}")
+    try:
+        resend("POST", f"/domains/{found['id']}/verify")
+        log(f"~ Resend verification of {ZONE} requested (sender switches once verified)")
+    except RailwayError as exc:
+        print(f"::warning title=Resend verification::{exc}", flush=True)
+    return env
 
 
 def ensure_custom_domains(project_id, env_id, services):
@@ -563,6 +650,8 @@ def main():
     changed = "ALL" if raw == "ALL" else [line.strip() for line in raw.splitlines() if line.strip()]
 
     project_id, env_id, (cli_kind, cli_secret) = find_project()
+    if "--cleanup" not in sys.argv:
+        FIXED["backend"].update(ensure_email())
     if "--cleanup" in sys.argv:
         if AUTH["kind"] == "account":
             delete_deploy_tokens(project_id)

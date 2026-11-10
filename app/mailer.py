@@ -1,12 +1,19 @@
 """E-mail delivery for the password-reset flow.
 
-Uses the SMTP settings from ``app.config``. When SMTP is not configured the
-reset link is printed to the server console instead so the flow remains
-testable locally; callers must then surface the link to the operator.
+Delivery order (see ``app.config``):
+
+1. Resend HTTPS API when ``FIHI_RESEND_API_KEY`` is set. It works on every
+   Railway plan (Railway blocks outbound SMTP below the Pro plan).
+2. SMTP when ``FIHI_SMTP_HOST`` and ``FIHI_EMAIL_FROM`` are set.
+3. Otherwise the reset link is written to the server logs, so the flow stays
+   usable locally.
 """
 
+import json
 import smtplib
 import ssl
+import urllib.error
+import urllib.request
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -14,11 +21,14 @@ from . import config, logs
 
 log = logs.get("mail")
 
+RESEND_URL = "https://api.resend.com/emails"
+# Resend's shared sender: usable before the shop's domain is verified, but it
+# only delivers to the address that owns the Resend account.
+RESEND_FALLBACK_FROM = "fihi-chifae <onboarding@resend.dev>"
 
-def send_password_reset(to_email, reset_link):
-    """Send the reset e-mail; returns True when accepted by a mail server."""
-    subject = "فيه شفاء — Réinitialisation du mot de passe admin"
-    body = (
+
+def _reset_body(reset_link):
+    return (
         (
             "<div style='font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#1f2937'>"
             "<h2>Réinitialisation du mot de passe admin</h2>"
@@ -40,18 +50,45 @@ def send_password_reset(to_email, reset_link):
         .replace("{ttl_min}", str(config.RESET_TOKEN_TTL_MS // 60000))
     )
 
-    if not (config.SMTP_HOST and config.EMAIL_FROM):
-        # Development/on-prem fallback: log the link so the operator can forward it.
-        log.warning("SMTP not configured: password-reset link", extra={"link": reset_link})
-        return True
 
-    to_email = to_email or config.DEFAULT_ADMIN_EMAIL
+def _send_resend(to_email, subject, html):
+    payload = {
+        "from": config.EMAIL_FROM or RESEND_FALLBACK_FROM,
+        "to": [to_email],
+        "subject": subject,
+        "html": html,
+    }
+    req = urllib.request.Request(  # noqa: S310 - fixed https URL
+        RESEND_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer " + config.RESEND_API_KEY,
+            "Content-Type": "application/json",
+            "User-Agent": "fihi-chifae",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 - fixed https URL
+            msg_id = json.load(resp).get("id")
+        log.info("password-reset e-mail sent", extra={"to": to_email, "id": msg_id})
+        return True
+    except urllib.error.HTTPError as exc:
+        detail = exc.read()[:300].decode("utf-8", "replace")
+        log.error(
+            "password-reset e-mail refused by Resend",
+            extra={"to": to_email, "status": exc.code, "error": detail},
+        )
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        log.error("password-reset e-mail failed", extra={"to": to_email, "error": str(exc)})
+    return False
+
+
+def _send_smtp(to_email, subject, html):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = config.EMAIL_FROM
     msg["To"] = to_email
-    msg.attach(MIMEText(body, "html", "utf-8"))
-
+    msg.attach(MIMEText(html, "html", "utf-8"))
     try:
         if config.SMTP_USE_TLS:
             with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=15) as s:
@@ -64,7 +101,22 @@ def send_password_reset(to_email, reset_link):
                 if config.SMTP_USER:
                     s.login(config.SMTP_USER, config.SMTP_PASSWORD)
                 s.send_message(msg)
+        log.info("password-reset e-mail sent", extra={"to": to_email, "via": "smtp"})
         return True
     except Exception as exc:  # pragma: no cover - depends on external servers
         log.error("password-reset e-mail failed", extra={"to": to_email, "error": str(exc)})
         return False
+
+
+def send_password_reset(to_email, reset_link):
+    """Send the reset e-mail; returns True when accepted for delivery."""
+    to_email = to_email or config.DEFAULT_ADMIN_EMAIL
+    subject = "فيه شفاء — Réinitialisation du mot de passe admin"
+    html = _reset_body(reset_link)
+    if config.RESEND_API_KEY:
+        return _send_resend(to_email, subject, html)
+    if config.SMTP_HOST and config.EMAIL_FROM:
+        return _send_smtp(to_email, subject, html)
+    # Development/on-prem fallback: log the link so the operator can forward it.
+    log.warning("no e-mail service configured: password-reset link", extra={"link": reset_link})
+    return True

@@ -17,3 +17,4 @@ Orders: customer filter (buyer name), current month by default; "all periods" ->
 Sizes: units g / kg / L; id "250g", shown "250 g" (value then unit, dir=ltr) in every language.
 Tests: real MySQL / Garage / Meilisearch from .env; every test deletes what it creates (tests/conftest.py).
 Domain: fihichifae.com on frontend (Hobby: 1 custom domain/service, no www); Cloudflare DNS (DNS only) written by railway_bootstrap.py with CLOUDFLARE_API_TOKEN.
+E-mail: Resend HTTPS API (RESEND_API_KEY secret -> FIHI_RESEND_API_KEY); SMTP blocked on Railway Hobby. Order reply carries the current WhatsApp number.

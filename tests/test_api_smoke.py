@@ -168,6 +168,8 @@ def test_public_order_roundtrip(base, admin_cookie, product):
     data = json.loads(body)
     assert status == 201
     assert data["total"] == 100.0 and data["delivery_fee"] == 0 and data["city"] == "BHALIL"
+    # the storefront sends the order to the admin's current WhatsApp number
+    assert data["whatsapp"].isdigit() and len(data["whatsapp"]) >= 9
 
     status, _, body = _req(base + "/api/v1/orders", headers=admin_cookie)
     listed = {o["id"]: o for o in json.loads(body)["orders"]}

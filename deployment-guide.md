@@ -70,9 +70,16 @@ username, password, reset e-mail and WhatsApp number are then changed from the
 dashboard (avatar circle → الملف الشخصي); `FIHI_ADMIN_*` and
 `FIHI_WHATSAPP_NUMBER` only seed a brand-new database.
 
-Optional, password-reset e-mails: add `FIHI_ADMIN_EMAIL`, `FIHI_SMTP_HOST`,
-`FIHI_SMTP_PORT`, `FIHI_SMTP_USER`, `FIHI_SMTP_PASSWORD`, `FIHI_EMAIL_FROM` on
-`backend` in Railway (without them the reset link is written to the backend logs).
+**Password-reset e-mails (Resend)**: Railway blocks outbound SMTP below the
+Pro plan, so mail goes through [Resend](https://resend.com)'s HTTPS API (free
+up to 3,000 e-mails / month). Repo secret **`RESEND_API_KEY`** (Resend → API
+Keys; *Full access* lets the setup step register the domain). Each deploy
+registers `fihichifae.com` at Resend, writes its SPF / DKIM / bounce records
+into Cloudflare and asks Resend to verify it; once verified, mail comes from
+`no-reply@fihichifae.com` (before that, from Resend's shared address, which only
+delivers to the Resend account's own e-mail). The reset link goes to the address
+saved in the profile panel; a fresh shop starts with `hamza.fihichifae@gmail.com`.
+Without a key, the link is written to the backend logs.
 
 A manual run (*Actions → CI/CD → Run workflow*) deploys the current `main` too.
 From a terminal: `railway login && railway link && make deploy`.
