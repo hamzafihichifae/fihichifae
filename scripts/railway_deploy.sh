@@ -21,5 +21,14 @@ for svc in "$@"; do
     *) echo "unknown service '$svc' (backend|frontend|mysql|storage|search)" >&2; exit 1 ;;
   esac
   echo "==> railway up --service $svc"
-  railway up --service "$svc" $ci_flag
+  log="$(mktemp)"
+  if ! railway up --service "$svc" $ci_flag 2>&1 | tee "$log"; then
+    # GitHub Actions: show the end of the output as an annotation on the run page
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+      echo "::error title=railway up $svc failed::$(tail -n 20 "$log" | sed ':a;N;$!ba;s/\n/%0A/g')"
+    fi
+    rm -f "$log"
+    exit 1
+  fi
+  rm -f "$log"
 done

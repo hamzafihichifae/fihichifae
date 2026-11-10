@@ -278,7 +278,11 @@ jobs:
           else
             # account token: link this checkout to the project first
             export RAILWAY_API_TOKEN="$TOKEN"
-            railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID"
+            if ! railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" > link.log 2>&1; then
+              cat link.log
+              echo "::error title=railway link failed::$(tail -n 15 link.log | sed ':a;N;$!ba;s/\n/%0A/g')"
+              exit 1
+            fi
           fi
           bash scripts/railway_deploy.sh ${{ steps.bootstrap.outputs.deploy }}
       - name: Wait until the shop answers
