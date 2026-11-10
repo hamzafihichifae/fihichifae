@@ -250,11 +250,8 @@ jobs:
             exit 1
           fi
           npm install -g @railway/cli
-          for svc in ${SERVICES//,/ }; do
-            echo "::group::railway up --service $svc"
-            railway up --service "$svc" --ci
-            echo "::endgroup::"
-          done
+          # each service is uploaded with its own railway.json (see the script)
+          bash scripts/railway_deploy.sh ${SERVICES//,/ }
       - name: Smoke test
         if: vars.PUBLIC_URL != ''
         run: |

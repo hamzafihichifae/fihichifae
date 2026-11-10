@@ -84,7 +84,7 @@ docker-scan: ## Trivy scan of the six images (if trivy installed)
 deploy: deploy-railway ## Default deploy = Railway
 
 deploy-railway: ## Deploy to Railway (railway login && railway link); SERVICES="backend frontend"
-	for svc in $${SERVICES:-backend frontend}; do railway up --service $$svc || exit 1; done
+	bash scripts/railway_deploy.sh $${SERVICES:-backend frontend}
 
 backup: ## Download a backup zip from production (needs URL and a logged-in COOKIE=fc_session=...)
 	@if [ -z "$(URL)" ] || [ -z "$(COOKIE)" ]; then echo "usage: make backup URL=https://... COOKIE=fc_session=..."; else mkdir -p backups && curl -fsS -H "Cookie: $(COOKIE)" "$(URL)/api/v1/admin/backup" -o backups/fihi-chifae-$$(date +%Y%m%d-%H%M).zip && echo "✔ saved in backups/"; fi
