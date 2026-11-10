@@ -1,19 +1,14 @@
 # fihi-chifae — Makefile (enterprise, POSIX, Windows Git Bash compatible)
 # Usage: make <target>  |  make help
-# Requires: python (3.10+), pip, git. Optional: docker, flyctl, pyinstaller
+# Requires: python (3.10+), pip, git, docker (compose v2). Optional: railway CLI
 
 PY            ?= python
 PIP           ?= $(PY) -m pip
 PORT          ?= 8000
 HOST          ?= 0.0.0.0
 
-IMAGE_NAME    ?= fihi-chifae
-GHCR_IMAGE    ?= ghcr.io/fihi-chifae/$(IMAGE_NAME)
-VERSION       ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
-PLATFORMS     ?= linux/amd64,linux/arm64
-
 .DEFAULT_GOAL := help
-.PHONY: help install launch dev test lint format format-check security audit bandit pip-audit clean docker-build docker-run docker-scan push github-init deploy deploy-railway deploy-fly deploy-render backup perf
+.PHONY: help install launch dev up down logs ps test lint format format-check security audit bandit pip-audit clean docker-build docker-scan deploy deploy-railway backup perf
 
 help: ## Show this help
 	@echo "fihi-chifae — available targets:"
@@ -27,11 +22,25 @@ install: ## Install runtime + dev deps (venv recommended)
 	@echo "✔ deps installed"
 
 # ── launch ──────────────────────────────────────────────────────────────
-launch: ## Launch server (python server.py --port $(PORT))
+up: ## Start the whole stack (frontend, backend, mysql, storage, search, fluentd) -> http://localhost:8080
+	@test -f .env || (cp .env.example .env && echo "created .env from .env.example: set its passwords/keys")
+	docker compose up -d --build
+
+down: ## Stop the stack (data volumes are kept)
+	docker compose down
+
+logs: ## Collected log files (Fluentd), newest backend lines
+	docker compose exec fluentd sh -c 'ls /fluentd/log; zcat /fluentd/log/docker.*backend*/*.gz 2>/dev/null | tail -20'
+
+ps: ## Stack status + memory per container
+	docker compose ps
+	docker stats --no-stream --format "table {{.Name}}	{{.MemUsage}}	{{.CPUPerc}}"
+
+launch: ## Launch the backend alone (needs MySQL, see .env)
 	@echo "→ http://$(HOST):$(PORT)  (Ctrl+C to stop)"
 	$(PY) server.py --host $(HOST) --port $(PORT)
 
-dev: ## Launch with auto-reload (watchdog, if installed)
+dev: ## Launch the backend and open the browser
 	$(PY) server.py --host $(HOST) --port $(PORT) --open
 
 # ── quality ─────────────────────────────────────────────────────────────
@@ -46,7 +55,7 @@ format-check: ## Check formatting without modifying
 	black --check app server.py tests
 	ruff check app server.py
 
-test: ## Run tests (each test deletes everything it creates, see tests/conftest.py)
+test: ## Run tests against the compose MySQL/Garage/Meilisearch (each test deletes what it creates)
 	$(PY) -m pytest -q --cov=app --cov-report=term-missing
 
 security: bandit pip-audit ## Run all security checks
@@ -60,53 +69,28 @@ pip-audit: ## pip-audit for known CVEs
 audit: pip-audit
 
 # ── performance ─────────────────────────────────────────────────────────
-perf: ## Load test the Docker image (USERS="5 100 1000" DURATION=60) -> perf-results/report.html
+perf: ## Load test the whole stack (USERS="5 100 1000" DURATION=60) -> perf-results/report.html
 	$(PIP) install -q -r perf/requirements.txt
-	docker build -t fihi-chifae:perf .
 	PERF_USERS="$${USERS:-5 100 1000}" PERF_DURATION="$${DURATION:-60}" bash perf/run.sh
 
 # ── docker ──────────────────────────────────────────────────────────────
-docker-build: ## Build Docker image (local)
-	docker build -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
+docker-build: ## Build the six images (docker compose)
+	docker compose build
 
-docker-run: ## Run the image like production: data kept in the named volume fihi-data
-	docker run --rm -p $(PORT):8000 -v fihi-data:/data --env FIHI_ADMIN_PASSWORD=$${FIHI_ADMIN_PASSWORD:-change-me-please} $(IMAGE_NAME):latest
-
-docker-scan: ## Trivy scan (if trivy installed)
-	trivy image --severity HIGH,CRITICAL $(IMAGE_NAME):latest 2>/dev/null || echo "install trivy: https://aquasecurity.github.io/trivy"
-
-# ── git / github ────────────────────────────────────────────────────────
-github-init: ## Init git repo, add remote, first commit (set REMOTE=url)
-	@if [ ! -d .git ]; then git init && echo "db kept but ignored for deploy" && git add . && git commit -m "chore: initial enterprise scaffold" && echo "✔ git init"; else echo "git already init"; fi
-	@if [ -n "$(REMOTE)" ]; then git remote add origin $(REMOTE) 2>/dev/null || git remote set-url origin $(REMOTE); else echo "set REMOTE=https://github.com/<org>/<repo>.git to add origin"; fi
-
-push: ## git push (lint+test before push)
-	$(MAKE) lint
-	$(MAKE) test
-	git add -A -- . ':!*.db'
-	git status
-	@echo "→ git commit & push"
-	git branch -M main
-	@git commit -m "chore: push $(VERSION)" 2>/dev/null || echo "nothing to commit"
-	git push origin main
+docker-scan: ## Trivy scan of the six images (if trivy installed)
+	for img in $$(docker compose config --images); do trivy image --severity HIGH,CRITICAL $$img || exit 1; done 2>/dev/null || echo "install trivy: https://aquasecurity.github.io/trivy"
 
 # ── deploy ──────────────────────────────────────────────────────────────
 deploy: deploy-railway ## Default deploy = Railway
 
-deploy-railway: ## Deploy to Railway (requires: railway login && railway link)
-	railway up --service $${RAILWAY_SERVICE:-fihi-chifae}
+deploy-railway: ## Deploy to Railway (railway login && railway link); SERVICES="backend frontend"
+	for svc in $${SERVICES:-backend frontend}; do railway up --service $$svc || exit 1; done
 
 backup: ## Download a backup zip from production (needs URL and a logged-in COOKIE=fc_session=...)
 	@if [ -z "$(URL)" ] || [ -z "$(COOKIE)" ]; then echo "usage: make backup URL=https://... COOKIE=fc_session=..."; else mkdir -p backups && curl -fsS -H "Cookie: $(COOKIE)" "$(URL)/api/v1/admin/backup" -o backups/fihi-chifae-$$(date +%Y%m%d-%H%M).zip && echo "✔ saved in backups/"; fi
 
-deploy-fly: ## Deploy to Fly.io (requires flyctl auth & fly.toml)
-	@if [ ! -f fly.toml ]; then echo "fly.toml not found — run: fly launch --no-deploy"; else fly deploy --ha=false; fi
-
-deploy-render: ## Trigger Render deploy via hook ($RENDER_DEPLOY_HOOK)
-	@if [ -z "$$RENDER_DEPLOY_HOOK" ]; then echo "set RENDER_DEPLOY_HOOK env"; else curl -X POST "$$RENDER_DEPLOY_HOOK"; fi
-
 # ── clean ───────────────────────────────────────────────────────────────
 clean: ## Remove caches, db journal, build artifacts
 	@echo "cleaning..."
-	@$(PY) -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for p in ['__pycache__','app/__pycache__','.pytest_cache','htmlcov','build','dist','.ruff_cache']]; import pathlib; [p.unlink(missing_ok=True) for p in pathlib.Path('.').glob('*.pyc')]"
+	@$(PY) -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for p in ['__pycache__','app/__pycache__','.pytest_cache','htmlcov','build','dist','.ruff_cache','.playwright-mcp']]; import pathlib; [p.unlink(missing_ok=True) for p in pathlib.Path('.').glob('*.pyc')]"
 	@echo "done"

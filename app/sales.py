@@ -44,16 +44,16 @@ def sales_summary():
         confirmed = [dict(r) for r in conn.execute(_CONFIRMED_ORDERS)]
         pending = dict(
             conn.execute(
-                "SELECT COUNT(*) AS orders,"
-                " COALESCE(SUM((SELECT SUM(price*qty) FROM order_items WHERE order_id=o.id)"
-                " + COALESCE(o.delivery_fee,0)),0) AS amount"
-                " FROM orders o WHERE o.status='pending'"
+                "SELECT COUNT(*) AS orders, COALESCE(SUM(t.amount),0) AS amount FROM ("
+                " SELECT COALESCE(o.delivery_fee,0)"
+                " + COALESCE((SELECT SUM(price*qty) FROM order_items WHERE order_id=o.id),0)"
+                " AS amount FROM orders o WHERE o.status='pending') t"
             ).fetchone()
         )
         top = [
             dict(r)
             for r in conn.execute(
-                "SELECT oi.product_name name, SUM(oi.qty) units,"
+                "SELECT oi.product_name name, CAST(SUM(oi.qty) AS SIGNED) units,"
                 " ROUND(SUM(oi.price*oi.qty),2) revenue FROM order_items oi"
                 " JOIN orders o ON o.id = oi.order_id WHERE o.status='confirmed'"
                 " GROUP BY oi.product_name ORDER BY revenue DESC LIMIT 6"
@@ -62,7 +62,7 @@ def sales_summary():
         by_cat = [
             dict(r)
             for r in conn.execute(
-                "SELECT oi.cat label, SUM(oi.qty) units,"
+                "SELECT oi.cat label, CAST(SUM(oi.qty) AS SIGNED) units,"
                 " ROUND(SUM(oi.price*oi.qty),2) revenue FROM order_items oi"
                 " JOIN orders o ON o.id = oi.order_id WHERE o.status='confirmed'"
                 " GROUP BY oi.cat ORDER BY revenue DESC"

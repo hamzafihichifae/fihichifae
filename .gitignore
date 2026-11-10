@@ -23,8 +23,7 @@ htmlcov/
 *.db-shm
 *.db-wal
 data/
-assets/uploads/*
-!assets/uploads/.gitkeep
+.media/
 backups/
 
 # Build

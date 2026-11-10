@@ -174,7 +174,7 @@ def test_public_order_roundtrip(base, admin_cookie, product):
     assert listed[data["order_id"]]["status"] == "pending"
 
 
-def test_backup_requires_login_and_contains_both_databases(base, admin_cookie):
+def test_backup_requires_login_and_contains_the_sql_dump(base, admin_cookie):
     import io
     import zipfile
 
@@ -183,7 +183,9 @@ def test_backup_requires_login_and_contains_both_databases(base, admin_cookie):
     status, headers, body = _req(base + "/api/v1/admin/backup", headers=admin_cookie)
     assert status == 200 and headers["Content-Type"] == "application/zip"
     names = zipfile.ZipFile(io.BytesIO(body)).namelist()
-    assert "fihi-chifae.db" in names and "fihi-chifae-archive.db" in names
+    assert "fihi-chifae.sql" in names
+    dump = zipfile.ZipFile(io.BytesIO(body)).read("fihi-chifae.sql").decode()
+    assert "CREATE TABLE `products_archive`" in dump and "CREATE TABLE `orders`" in dump
 
 
 def test_catalog_cache_is_refreshed_by_admin_changes(base, admin_cookie):
@@ -207,3 +209,49 @@ def test_catalog_cache_is_refreshed_by_admin_changes(base, admin_cookie):
     assert status == 200 and headers["ETag"] != etag  # change visible immediately
     names = [p["name"] for c in json.loads(body)["categories"] for p in c["products"]]
     assert "pytest-cache-prod" in names
+
+
+def test_public_settings_and_search(base, admin_cookie):
+    status, _, body = _req(base + "/api/v1/settings")
+    assert status == 200 and json.loads(body)["whatsapp"].isdigit()
+    status, _, body = _req(
+        base + "/api/v1/categories", "POST", {"name": "pytest-search-cat"}, admin_cookie
+    )
+    slug = json.loads(body)["category"]["slug"]
+    status, _, body = _req(
+        base + "/api/v1/products",
+        "POST",
+        {"name": "pytest زيت", "name_fr": "Pytestxq huile", "cat": slug, "price": 10},
+        admin_cookie,
+    )
+    pid = json.loads(body)["id"]
+    status, _, body = _req(base + "/api/v1/search?q=pytestxq")
+    data = json.loads(body)
+    assert status == 200 and data["engine"] in ("meilisearch", "builtin")
+    deadline = time.time() + 10  # Meilisearch indexes asynchronously
+    while pid not in data["ids"] and time.time() < deadline:
+        time.sleep(0.5)
+        data = json.loads(_req(base + "/api/v1/search?q=pytestxq")[2])
+    assert pid in data["ids"]
+
+
+def test_profile_and_customers_require_login(base, admin_cookie):
+    for method, path in (
+        ("GET", "/api/v1/admin/profile"),
+        ("PUT", "/api/v1/admin/profile"),
+        ("POST", "/api/v1/admin/profile/avatar"),
+        ("GET", "/api/v1/orders/customers"),
+    ):
+        status, _, _ = _req(base + path, method, {} if method != "GET" else None)
+        assert status == 401, path
+    status, _, body = _req(base + "/api/v1/admin/profile", headers=admin_cookie)
+    assert status == 200 and {"username", "email", "phone", "avatar"} <= set(
+        json.loads(body)["profile"]
+    )
+    status, _, body = _req(
+        base + "/api/v1/admin/profile",
+        "PUT",
+        {"current_password": "definitely-wrong", "email": "x@example.com"},
+        admin_cookie,
+    )
+    assert status == 403 and json.loads(body)["error"]["code"] == "wrong_password"

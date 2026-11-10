@@ -6,11 +6,11 @@
   <title>فيه شفاء - عسل، أملو وزيت أركان مغربي طبيعي</title>
   <meta name="description" content="فيه شفاء: عسل مغربي حر، أملو، زيت أركان، زيوت طبيعية، أعشاب وشاي. منتجات طبيعية 100% بدون إضافات، توصيل لجميع أنحاء المغرب والدفع عند الاستلام.">
   <meta name="theme-color" content="#16a34a">
-  <link rel="icon" href="assets/logo.jpg" type="image/jpeg">
+  <link rel="icon" href="/media/logo.jpg" type="image/jpeg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="assets/style.css?v=8">
+  <link rel="stylesheet" href="assets/style.css?v=9">
 </head>
 <body>
 
@@ -46,7 +46,7 @@
 
     <div class="masthead-inner">
       <a href="/" class="logo" aria-label="فيه شفاء">
-        <img src="assets/logo.jpg" alt="شعار فيه شفاء">
+        <img src="/media/logo.jpg" alt="شعار فيه شفاء">
         <span>
           <span class="logo-text">فيه <b>شفاء</b></span>
           <span class="logo-sub" data-i18n="masthead-sub">الطبيعة المغربية</span>
@@ -54,11 +54,13 @@
       </a>
 
       <div class="search" role="search">
-        <input type="search" class="search-input" id="searchInput" placeholder="ابحث عن منتج" aria-label="ابحث عن منتج" autocomplete="off">
+        <input type="search" class="search-input" id="searchInput" placeholder="ابحث عن منتج" aria-label="ابحث عن منتج" autocomplete="off"
+          role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="searchResults">
         <button class="btn-search" id="searchBtn" type="button" aria-label="بحث">
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3" stroke-linecap="round"/></svg>
           <span data-i18n="search-btn">بحث</span>
         </button>
+        <ul class="search-dropdown" id="searchResults" role="listbox" aria-label="نتائج البحث" hidden></ul>
       </div>
 
       <div class="header-actions">
@@ -82,7 +84,7 @@
     <div class="mobile-menu-panel">
       <div class="mobile-head">
         <a href="/" class="logo">
-          <img src="assets/logo.jpg" alt="شعار فيه شفاء">
+          <img src="/media/logo.jpg" alt="شعار فيه شفاء">
           <span class="logo-text">فيه <b>شفاء</b></span>
         </a>
         <button class="close-btn" id="closeMenu" type="button" aria-label="إغلاق" data-i18n-aria="close">
@@ -114,7 +116,7 @@
           </div>
         </div>
         <div class="hero-visual">
-          <img src="assets/logo.jpg" alt="شعار فيه شفاء">
+          <img src="/media/logo.jpg" alt="شعار فيه شفاء">
           <div class="hero-float hf-1">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke-linejoin="round"/></svg>
             <div><b data-i18n="trust-natural">100% طبيعي</b><span data-i18n="hf1-sub">ضمان بدون إضافات</span></div>
@@ -186,7 +188,7 @@
     <div class="footer-grid">
       <div class="footer-brand">
         <a href="/" class="logo">
-          <img src="assets/logo.jpg" alt="شعار فيه شفاء">
+          <img src="/media/logo.jpg" alt="شعار فيه شفاء">
           <span class="logo-text">فيه <b>شفاء</b></span>
         </a>
         <p data-i18n="footer-brand">فيه شفاء علامة مغربية من البهاليل متخصصة في العسل الطبيعي ومنتجات الخلية والزيوت التقليدية، نختارها بعناية من قلب الطبيعة المغربية.</p>
@@ -218,7 +220,7 @@
       <div class="footer-col footer-contact">
         <h4 data-i18n="fc3-title">تواصل معنا</h4>
         <ul>
-          <li><a href="tel:+212681771457" class="ltr-num">+212 681 771 457</a></li>
+          <li><a href="tel:+212681771457" class="ltr-num" data-shop-phone>+212 681 771 457</a></li>
           <li><a href="https://wa.me/212681771457" target="_blank" rel="noopener" data-i18n="fc3-wa">واتساب: اطلب أو استفسر</a></li>
           <li><span data-i18n="fc3-city">البهاليل، إقليم صفرو، المغرب</span></li>
         </ul>
@@ -237,26 +239,13 @@
     </div>
   </footer>
 
-  <!-- ===== Search overlay ===== -->
-  <div class="search-panel" id="searchPanel">
-    <div class="search-panel-card" role="dialog" aria-modal="true" aria-label="بحث">
-      <div class="search-panel-head">
-        <input type="search" id="searchLive" placeholder="ابحث عن منتج..." autocomplete="off">
-        <button class="close-btn" id="closeSearch" type="button" aria-label="إغلاق" data-i18n-aria="close">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" stroke-linecap="round"/></svg>
-        </button>
-      </div>
-      <div class="prod-grid search-results" id="searchResults"></div>
-    </div>
-  </div>
-
   <!-- ===== Product details ===== -->
   <div class="pd-overlay" id="productModal" hidden>
     <div class="pd-card" role="dialog" aria-modal="true" aria-labelledby="pdName">
       <button class="close-btn pd-close" id="pdClose" type="button" aria-label="إغلاق" data-i18n-aria="close">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" stroke-linecap="round"/></svg>
       </button>
-      <div class="pd-media"><img id="pdImg" src="assets/logo.jpg" alt=""></div>
+      <div class="pd-media"><img id="pdImg" src="/media/logo.jpg" alt=""></div>
       <div class="pd-body" id="pdBody"></div>
     </div>
   </div>
@@ -316,7 +305,7 @@
   <div id="waBotOverlay" class="wa-bot-overlay" aria-hidden="true">
     <div class="wa-bot-window" role="dialog" aria-modal="true" aria-label="WhatsApp">
       <div class="wa-bot-header">
-        <div class="wa-bot-avatar"><img src="assets/logo.jpg" alt=""></div>
+        <div class="wa-bot-avatar"><img src="/media/logo.jpg" alt=""></div>
         <div class="wa-bot-info">
           <b data-i18n="wa_bot_name">فيه شفاء - المساعد</b>
           <span data-i18n="wa_bot_status">متصل الآن • يرد عادة خلال دقائق</span>
@@ -335,6 +324,6 @@
   </div>
 
   <script src="assets/delivery.js?v=1"></script>
-  <script src="assets/main.js?v=16"></script>
+  <script src="assets/main.js?v=18"></script>
 </body>
 </html>

@@ -10,7 +10,9 @@ import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from . import config
+from . import config, logs
+
+log = logs.get("mail")
 
 
 def send_password_reset(to_email, reset_link):
@@ -40,11 +42,7 @@ def send_password_reset(to_email, reset_link):
 
     if not (config.SMTP_HOST and config.EMAIL_FROM):
         # Development/on-prem fallback: log the link so the operator can forward it.
-        print(
-            "[mail] SMTP non configuré — lien de réinitialisation "
-            f"(à transmettre) :\n  {reset_link}",
-            flush=True,
-        )
+        log.warning("SMTP not configured: password-reset link", extra={"link": reset_link})
         return True
 
     to_email = to_email or config.DEFAULT_ADMIN_EMAIL
@@ -68,5 +66,5 @@ def send_password_reset(to_email, reset_link):
                 s.send_message(msg)
         return True
     except Exception as exc:  # pragma: no cover - depends on external servers
-        print(f"[mail] échec d'envoi vers {to_email}\n  {exc}")
+        log.error("password-reset e-mail failed", extra={"to": to_email, "error": str(exc)})
         return False

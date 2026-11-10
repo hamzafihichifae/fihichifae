@@ -1,0 +1,22 @@
+# Load-test overrides (perf/run.sh): a separate, throw-away copy of the stack.
+# No host ports except the frontend, no Fluentd driver (would compete for CPU),
+# backend limited like a small Railway instance, rate limits lifted (all
+# virtual users share one IP).
+services:
+  fluentd: { ports: !reset [] }
+  mysql: { ports: !reset [], logging: !reset {} }
+  storage: { ports: !reset [], logging: !reset {} }
+  search: { ports: !reset [], logging: !reset {} }
+  backend:
+    logging: !reset {}
+    cpus: ${PERF_CPUS:-1}
+    mem_limit: ${PERF_MEMORY:-512m}
+    environment:
+      FIHI_SEED_DEMO: "1"
+      FIHI_ORDER_RATE_LIMIT: "100000000"
+      FIHI_NEWSLETTER_RATE_LIMIT: "100000000"
+      FIHI_SEARCH_RATE_LIMIT: "100000000"
+      FIHI_LOG_LEVEL: WARNING
+  frontend:
+    logging: !reset {}
+    ports: !override ["127.0.0.1:${PERF_PORT:-18080}:8080"]

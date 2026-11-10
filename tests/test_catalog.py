@@ -4,7 +4,7 @@ import base64
 
 import pytest
 
-from app import catalog, config
+from app import catalog, config, storage
 from app import db as database
 from app.catalog import StoreError
 
@@ -79,8 +79,9 @@ def test_image_upload_is_stored_and_svg_rejected(category):
     p = catalog.add_product(
         "pytest-img", category["slug"], 10.0, "data:image/png;base64," + PNG_1PX
     )
-    assert p["img"].startswith(config.UPLOAD_URL_PREFIX)
-    assert catalog.uploaded_file_path(p["img"])
+    assert p["img"].startswith(config.MEDIA_BASE_URL + "/prod_")
+    name = catalog.uploaded_name(p["img"])
+    assert name and storage.get(name)[1:4] == b"PNG"
     svg = base64.b64encode(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>").decode()
     with pytest.raises(StoreError):
         catalog.store_image_source("data:image/svg+xml;base64," + svg)
@@ -89,4 +90,4 @@ def test_image_upload_is_stored_and_svg_rejected(category):
 def test_image_path_traversal_is_rejected():
     with pytest.raises(StoreError):
         catalog.store_image_source("assets/../fihi-chifae.db")
-    assert catalog.uploaded_file_path("assets/uploads/../../x") is None
+    assert catalog.uploaded_name("assets/uploads/../../x") is None

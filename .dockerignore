@@ -11,8 +11,7 @@ venv
 *.db-wal
 data
 backups
-assets/uploads/*
-!assets/uploads/.gitkeep
+.media
 tests
 __pycache__
 *.pyc

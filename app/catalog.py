@@ -3,12 +3,11 @@
 import base64
 import functools
 import json
-import os
 import re
 import secrets
 import time
 
-from . import config
+from . import config, storage
 from . import db as database
 
 
@@ -30,7 +29,10 @@ _catalog_version = [0]
 
 
 def bump_catalog_version():
+    from . import search  # local import: search reads the catalog tables
+
     _catalog_version[0] += 1
+    search.schedule_reindex()
 
 
 def catalog_version():
@@ -112,7 +114,7 @@ def parse_sizes(raw):
         if not size or len(size) > 12:
             raise StoreError(400, "invalid_sizes", "قيمة الحجم غير صالحة (1 إلى 12 حرفاً)")
         if unit not in config.SIZE_UNITS:
-            raise StoreError(400, "invalid_sizes", "الوحدة غير صالحة (kg أو L)")
+            raise StoreError(400, "invalid_sizes", "الوحدة غير صالحة (g أو kg أو L)")
         try:
             price = round(float(item.get("price")), 2)
         except (TypeError, ValueError):
@@ -140,8 +142,21 @@ def product_sizes(row):
 
 
 def size_label(size):
-    """Human label of a size variant, identical to the storefront's (e.g. ``0.5kg``)."""
+    """Identifier of a size variant, identical to the storefront's (e.g. ``0.5kg``, ``250g``).
+
+    Shown to people as ``<value> <unit>`` (``250 g``) in every language.
+    """
     return f"{size['size']}{size['unit']}"
+
+
+def _clean_alt_name(text):
+    """Optional French/English product name (used by search)."""
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if len(text) > config.MAX_NAME_LEN:
+        raise StoreError(
+            400, "invalid_product_name", f"الاسم طويل جداً (الحد {config.MAX_NAME_LEN} حرفاً)"
+        )
+    return text or None
 
 
 def _clean_description(text):
@@ -158,6 +173,8 @@ def product_json(row):
     return {
         "id": row["id"],
         "name": row["name"],
+        "name_fr": (row["name_fr"] if "name_fr" in keys else None) or "",
+        "name_en": (row["name_en"] if "name_en" in keys else None) or "",
         "cat": row["cat"],
         "min": row["min"],
         "max": row["max"],
@@ -194,7 +211,8 @@ def featured_from_sales(conn, limit=4):
     catalog's ``featured`` picks fill the remaining slots.
     """
     sold = conn.execute(
-        "SELECT oi.product_id, oi.product_name, oi.cat FROM order_items oi"
+        "SELECT ANY_VALUE(oi.product_id) product_id, ANY_VALUE(oi.product_name) product_name,"
+        " ANY_VALUE(oi.cat) cat FROM order_items oi"
         " JOIN orders o ON o.id = oi.order_id"
         " WHERE o.status = 'confirmed'"
         " GROUP BY COALESCE(oi.product_id, oi.product_name || '|' || oi.cat)"
@@ -217,15 +235,15 @@ def featured_from_sales(conn, limit=4):
                 (r["product_name"], r["cat"]),
             ).fetchone()
         take(row)
-    for row in conn.execute("SELECT * FROM products WHERE featured=1 ORDER BY rowid"):
+    for row in conn.execute("SELECT * FROM products WHERE featured=1 ORDER BY seq"):
         take(row)
     return featured
 
 
 def grouped_catalog():
     with database.live_db() as conn:
-        cats = conn.execute("SELECT * FROM categories ORDER BY rowid").fetchall()
-        prods = conn.execute("SELECT * FROM products ORDER BY rowid").fetchall()
+        cats = conn.execute("SELECT * FROM categories ORDER BY seq").fetchall()
+        prods = conn.execute("SELECT * FROM products ORDER BY seq").fetchall()
         out = []
         for c in cats:
             out.append(
@@ -245,10 +263,9 @@ def grouped_catalog():
 def category_names():
     """slug -> Arabic title, including archived categories (used by reports)."""
     names = {}
-    with database.archive_db() as conn:
-        for r in conn.execute("SELECT slug,title_ar FROM old_categories ORDER BY archived_at"):
-            names[r["slug"]] = r["title_ar"]
     with database.live_db() as conn:
+        for r in conn.execute("SELECT slug,title_ar FROM categories_archive ORDER BY archived_at"):
+            names[r["slug"]] = r["title_ar"]
         for r in conn.execute("SELECT slug,title_ar FROM categories"):
             names[r["slug"]] = r["title_ar"]
     return names
@@ -297,7 +314,7 @@ def create_category(name):
         slug = "c" + secrets.token_hex(5)
         conn.execute(
             "INSERT INTO categories(slug,title_ar,title_fr,title_en,img) VALUES(?,?,?,?,?)",
-            (slug, name, name, name, config.P + "cat-default.svg"),
+            (slug, name, name, name, storage.url("cat-default.svg")),
         )
         row = get_category(conn, slug)
     return category_json(row)
@@ -322,22 +339,21 @@ def delete_category(slug, archived_by="admin"):
                 "category_has_products",
                 "لا يمكن حذف فئة تحتوي على منتجات — احذف منتجاتها أولاً.",
             )
-        with database.archive_db() as arch:
-            arch.execute(
-                "INSERT INTO old_categories"
-                "(id,slug,title_ar,title_fr,title_en,img,archived_at,archived_by)"
-                " VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    database.unique_id("oc"),
-                    row["slug"],
-                    row["title_ar"],
-                    row["title_fr"],
-                    row["title_en"],
-                    row["img"],
-                    database.now(),
-                    archived_by,
-                ),
-            )
+        conn.execute(
+            "INSERT INTO categories_archive"
+            "(id,slug,title_ar,title_fr,title_en,img,archived_at,archived_by)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (
+                database.unique_id("oc"),
+                row["slug"],
+                row["title_ar"],
+                row["title_fr"],
+                row["title_en"],
+                row["img"],
+                database.now(),
+                archived_by,
+            ),
+        )
         conn.execute("DELETE FROM categories WHERE slug=?", (slug,))
     return {"deleted": slug, "archived": True}
 
@@ -359,8 +375,9 @@ def _check_name(name):
 
 
 @_changes_catalog
-def add_product(name, cat, price, img_source, sizes=None, description=""):
+def add_product(name, cat, price, img_source, sizes=None, description="", name_fr="", name_en=""):
     name = _check_name(name)
+    name_fr, name_en = _clean_alt_name(name_fr), _clean_alt_name(name_en)
     if price is not None and not (0 <= price <= 1_000_000):
         raise StoreError(400, "invalid_price", "السعر غير صالح")
     sizes = parse_sizes(sizes)
@@ -381,12 +398,13 @@ def add_product(name, cat, price, img_source, sizes=None, description=""):
         stored_img = store_image_source(img_source) if img_source else ""
         pid = barcode()
         conn.execute(
-            "INSERT INTO products"
-            " (id,name,cat,min,max,img,ribbon,featured,custom,created,sizes,description)"
-            " VALUES(?,?,?,?,?,?,0,0,1,?,?,?)",
+            "INSERT INTO products (id,name,name_fr,name_en,cat,`min`,`max`,img,ribbon,featured,"
+            "custom,created,sizes,description) VALUES(?,?,?,?,?,?,?,?,0,0,1,?,?,?)",
             (
                 pid,
                 name,
+                name_fr,
+                name_en,
                 cat,
                 min_price,
                 max_price,
@@ -402,7 +420,15 @@ def add_product(name, cat, price, img_source, sizes=None, description=""):
 
 @_changes_catalog
 def update_product(
-    pid, name=None, cat=None, price=None, img_source=None, sizes=None, description=None
+    pid,
+    name=None,
+    cat=None,
+    price=None,
+    img_source=None,
+    sizes=None,
+    description=None,
+    name_fr=None,
+    name_en=None,
 ):
     """Update an existing product. ``None`` means "unchanged" for every field.
 
@@ -428,6 +454,10 @@ def update_product(
     sizes = parse_sizes(sizes)
     if description is not None:
         description = _clean_description(description)
+    if name_fr is not None:
+        name_fr = _clean_alt_name(name_fr)
+    if name_en is not None:
+        name_en = _clean_alt_name(name_en)
 
     need_img = bool(img_source)
     stored_img = store_image_source(img_source) if need_img else None
@@ -440,6 +470,8 @@ def update_product(
         new_cat = cat if cat is not None else row["cat"]
         new_img = stored_img if need_img else row["img"]
         new_desc = description if description is not None else row["description"]
+        new_fr = name_fr if name_fr is not None else row["name_fr"]
+        new_en = name_en if name_en is not None else row["name_en"]
 
         size_json, new_min, new_max = row["sizes"], row["min"], row["max"]
         if sizes:
@@ -462,9 +494,20 @@ def update_product(
 
         old_img = row["img"]
         conn.execute(
-            "UPDATE products SET name=?, cat=?, min=?, max=?, img=?, sizes=?, description=?"
-            " WHERE id=?",
-            (new_name, new_cat, new_min, new_max, new_img, size_json, new_desc, pid),
+            "UPDATE products SET name=?, name_fr=?, name_en=?, cat=?, `min`=?, `max`=?, img=?,"
+            " sizes=?, description=? WHERE id=?",
+            (
+                new_name,
+                new_fr,
+                new_en,
+                new_cat,
+                new_min,
+                new_max,
+                new_img,
+                size_json,
+                new_desc,
+                pid,
+            ),
         )
         updated = conn.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
     if need_img and old_img and old_img != new_img:
@@ -474,64 +517,58 @@ def update_product(
 
 @_changes_catalog
 def archive_product(pid, archived_by):
-    """Delete a product from the catalog by moving it to the archive database.
+    """Delete a product from the catalog by moving it to ``products_archive``.
 
-    The full row (and its image file) is kept so the product can be restored.
+    The full row (and its image) is kept so the product can be restored. Both
+    statements run in one transaction: a product is never lost or duplicated.
     """
-    with database.db_lock, database.live_db() as live_conn:
-        row = live_conn.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+    with database.db_lock, database.live_db() as conn:
+        row = conn.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
         if not row:
             raise StoreError(404, "not_found", "المنتج غير موجود")
         rev_id = database.unique_id("old")
-        with database.archive_db() as archive_conn:
-            archive_conn.execute(
-                "INSERT INTO old_products"
-                " (id,original_id,name,cat,min,max,img,ribbon,featured,custom,"
-                " created,revoked_at,revoked_by,sizes,description)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    rev_id,
-                    row["id"],
-                    row["name"],
-                    row["cat"],
-                    row["min"],
-                    row["max"],
-                    row["img"],
-                    row["ribbon"],
-                    row["featured"],
-                    row["custom"],
-                    row["created"],
-                    database.now(),
-                    archived_by,
-                    row["sizes"],
-                    row["description"],
-                ),
-            )
-        live_conn.execute("DELETE FROM products WHERE id=?", (pid,))
+        conn.execute(
+            "INSERT INTO products_archive"
+            " (id,original_id,name,name_fr,name_en,cat,`min`,`max`,img,ribbon,featured,custom,"
+            " created,revoked_at,revoked_by,sizes,description)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rev_id,
+                row["id"],
+                row["name"],
+                row["name_fr"],
+                row["name_en"],
+                row["cat"],
+                row["min"],
+                row["max"],
+                row["img"],
+                row["ribbon"],
+                row["featured"],
+                row["custom"],
+                row["created"],
+                database.now(),
+                archived_by,
+                row["sizes"],
+                row["description"],
+            ),
+        )
+        conn.execute("DELETE FROM products WHERE id=?", (pid,))
     return rev_id
 
 
-# Legacy names: both former actions now archive.
-revoke_product = archive_product
-
-
-def delete_product(pid, archived_by="admin"):
-    return archive_product(pid, archived_by)
-
-
 def list_archive():
-    with database.archive_db() as conn:
+    with database.live_db() as conn:
         products = [
             dict(r)
             for r in conn.execute(
-                "SELECT id,original_id,name,cat,min,img,revoked_at,revoked_by FROM old_products"
-                " ORDER BY revoked_at DESC"
+                "SELECT id,original_id,name,cat,`min`,img,revoked_at,revoked_by"
+                " FROM products_archive ORDER BY revoked_at DESC"
             )
         ]
         categories = [
             dict(r)
             for r in conn.execute(
-                "SELECT id,slug,title_ar,archived_at,archived_by FROM old_categories"
+                "SELECT id,slug,title_ar,archived_at,archived_by FROM categories_archive"
                 " ORDER BY archived_at DESC"
             )
         ]
@@ -541,59 +578,56 @@ def list_archive():
 @_changes_catalog
 def restore_product(archive_id):
     """Put an archived product back into the catalog (re-creating its category)."""
-    with database.db_lock, database.archive_db() as arch:
-        row = arch.execute("SELECT * FROM old_products WHERE id=?", (archive_id,)).fetchone()
+    with database.db_lock, database.live_db() as conn:
+        row = conn.execute("SELECT * FROM products_archive WHERE id=?", (archive_id,)).fetchone()
         if not row:
             raise StoreError(404, "not_found", "المنتج غير موجود في الأرشيف")
-        with database.live_db() as conn:
-            if not category_exists(conn, row["cat"]):
-                cat = arch.execute(
-                    "SELECT * FROM old_categories WHERE slug=? ORDER BY archived_at DESC LIMIT 1",
-                    (row["cat"],),
-                ).fetchone()
-                if not cat:
-                    raise StoreError(400, "invalid_category", "فئة هذا المنتج لم تعد موجودة")
-                conn.execute(
-                    "INSERT INTO categories(slug,title_ar,title_fr,title_en,img) VALUES(?,?,?,?,?)",
-                    (cat["slug"], cat["title_ar"], cat["title_fr"], cat["title_en"], cat["img"]),
-                )
-                arch.execute("DELETE FROM old_categories WHERE slug=?", (cat["slug"],))
-            if conn.execute(
-                "SELECT 1 FROM products WHERE name=? AND cat=?", (row["name"], row["cat"])
-            ).fetchone():
-                raise StoreError(409, "product_exists", "يوجد منتج بنفس الاسم في هذه الفئة")
-            pid = row["original_id"]
-            if not pid or conn.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone():
-                pid = barcode()
+        if not category_exists(conn, row["cat"]):
+            cat = conn.execute(
+                "SELECT * FROM categories_archive WHERE slug=? ORDER BY archived_at DESC LIMIT 1",
+                (row["cat"],),
+            ).fetchone()
+            if not cat:
+                raise StoreError(400, "invalid_category", "فئة هذا المنتج لم تعد موجودة")
             conn.execute(
-                "INSERT INTO products"
-                " (id,name,cat,min,max,img,ribbon,featured,custom,created,sizes,description)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    pid,
-                    row["name"],
-                    row["cat"],
-                    row["min"],
-                    row["max"],
-                    row["img"],
-                    row["ribbon"],
-                    row["featured"],
-                    row["custom"],
-                    row["created"],
-                    row["sizes"],
-                    row["description"],
-                ),
+                "INSERT INTO categories(slug,title_ar,title_fr,title_en,img) VALUES(?,?,?,?,?)",
+                (cat["slug"], cat["title_ar"], cat["title_fr"], cat["title_en"], cat["img"]),
             )
-        arch.execute("DELETE FROM old_products WHERE id=?", (archive_id,))
+            conn.execute("DELETE FROM categories_archive WHERE slug=?", (cat["slug"],))
+        if conn.execute(
+            "SELECT 1 FROM products WHERE name=? AND cat=?", (row["name"], row["cat"])
+        ).fetchone():
+            raise StoreError(409, "product_exists", "يوجد منتج بنفس الاسم في هذه الفئة")
+        pid = row["original_id"]
+        if not pid or conn.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone():
+            pid = barcode()
+        conn.execute(
+            "INSERT INTO products (id,name,name_fr,name_en,cat,`min`,`max`,img,ribbon,featured,"
+            "custom,created,sizes,description) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                pid,
+                row["name"],
+                row["name_fr"],
+                row["name_en"],
+                row["cat"],
+                row["min"],
+                row["max"],
+                row["img"],
+                row["ribbon"],
+                row["featured"],
+                row["custom"],
+                row["created"],
+                row["sizes"],
+                row["description"],
+            ),
+        )
+        conn.execute("DELETE FROM products_archive WHERE id=?", (archive_id,))
     return {"restored": pid}
 
 
 # ---------------------------------------------------------------------------
 # media (uploaded product images)
 # ---------------------------------------------------------------------------
-
-IMAGE_URL_RE = re.compile(r"^assets/[A-Za-z0-9_./-]+$")
-UPLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def sniff_ext(content):
@@ -609,45 +643,51 @@ def sniff_ext(content):
     return None
 
 
+def decode_data_url(source, max_bytes=config.MAX_UPLOAD_BYTES):
+    """Bytes + extension of an uploaded ``data:`` URL (raster images only)."""
+    _, sep, data = source.partition(",")
+    if not sep:
+        raise StoreError(400, "invalid_image", "صورة غير صالحة")
+    try:
+        content = base64.b64decode(data.strip(), validate=True)
+    except Exception:
+        raise StoreError(400, "invalid_image", "صورة غير صالحة") from None
+    if not content or len(content) > max_bytes:
+        limit = max_bytes // (1024 * 1024)
+        raise StoreError(400, "invalid_image", f"الصورة كبيرة جداً (الحد {limit} ميغا)")
+    ext = sniff_ext(content)
+    if not ext:
+        raise StoreError(400, "invalid_image", "صيغة الصورة غير مدعومة (PNG، JPG، WEBP، GIF)")
+    return content, ext
+
+
+def save_upload(content, ext, prefix="prod"):
+    """Store image bytes in the object storage; returns the URL kept in the database."""
+    fname = f"{prefix}_{int(time.time() * 1000)}{secrets.token_hex(3)}.{ext}"
+    try:
+        storage.put(fname, content)
+    except storage.StorageError as exc:
+        raise StoreError(503, "storage_unavailable", "تعذر حفظ الصورة، حاول مرة أخرى") from exc
+    return storage.url(fname)
+
+
 def store_image_source(source):
-    """Accept either a data-URL (uploaded file) or a known local asset path."""
+    """Accept an uploaded file (data: URL) or the URL of an image already stored."""
     if source.startswith("data:"):
-        _, sep, data = source.partition(",")
-        if not sep:
-            raise StoreError(400, "invalid_image", "صورة غير صالحة")
-        try:
-            content = base64.b64decode(data.strip(), validate=True)
-        except Exception:
-            raise StoreError(400, "invalid_image", "صورة غير صالحة") from None
-        if not content or len(content) > config.MAX_UPLOAD_BYTES:
-            raise StoreError(400, "invalid_image", "الصورة كبيرة جداً (الحد 8 ميغا)")
-        ext = sniff_ext(content)
-        if not ext:
-            raise StoreError(400, "invalid_image", "صيغة الصورة غير مدعومة (PNG، JPG، WEBP، GIF)")
-        os.makedirs(config.UPLOAD_DIR, exist_ok=True)
-        fname = f"prod_{int(time.time() * 1000)}{secrets.token_hex(3)}.{ext}"
-        with open(os.path.join(config.UPLOAD_DIR, fname), "wb") as fh:
-            fh.write(content)
-        return config.UPLOAD_URL_PREFIX + fname
-    if IMAGE_URL_RE.match(source or "") and ".." not in source:
+        return save_upload(*decode_data_url(source))
+    if storage.name_from_url(source):
         return source
     raise StoreError(400, "invalid_image", "مصدر الصورة غير مسموح")
 
 
-def uploaded_file_path(rel_path):
-    """Filesystem path of an uploaded image URL, or None if it is not one."""
-    if not rel_path or not rel_path.startswith(config.UPLOAD_URL_PREFIX):
-        return None
-    name = rel_path[len(config.UPLOAD_URL_PREFIX) :]
-    if not UPLOAD_NAME_RE.match(name):
-        return None
-    return os.path.join(config.UPLOAD_DIR, name)
+def uploaded_name(url):
+    """Object name of an image the admin uploaded (deletable), or None."""
+    name = storage.name_from_url(url)
+    return name if name and name.startswith(storage.UPLOAD_PREFIXES) else None
 
 
-def remove_stored_image(rel_path):
-    full = uploaded_file_path(rel_path)
-    if full and os.path.isfile(full):
-        try:
-            os.remove(full)
-        except OSError:
-            pass
+def remove_stored_image(url):
+    """Delete an uploaded image; shared images (logo, category pictures) are kept."""
+    name = uploaded_name(url)
+    if name:
+        storage.delete(name)

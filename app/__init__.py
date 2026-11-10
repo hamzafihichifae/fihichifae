@@ -1,1 +1,1 @@
-"""fihi-chifae application package (SQLite-backed storefront + admin API)."""
+"""fihi-chifae application package (storefront + admin API on MySQL)."""

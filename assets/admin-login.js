@@ -48,7 +48,6 @@
     post('/api/v1/admin/session', { username: user, password: pass })
       .then(function (res) {
         if (res.ok && res.data.ok) { window.location.replace(nextUrl()); return; }
-        if (res.data.mfa_required) { msg.textContent = 'التحقق بخطوتين غير متاح بعد.'; return; }
         var text = errMsg(res.data, 'بيانات الدخول غير صحيحة.');
         if (typeof res.data.remaining_attempts === 'number') text += ' (المحاولات المتبقية: ' + res.data.remaining_attempts + ')';
         msg.textContent = text;

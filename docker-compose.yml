@@ -1,0 +1,101 @@
+# fihi-chifae — the whole stack on one machine (local runs, tests, load tests).
+# Production runs the same images (minus fluentd) as separate Railway services
+# (deployment-guide.md). Fluentd is a local-development tool only.
+#
+#   cp .env.example .env    # then set the passwords / keys
+#   docker compose up -d --build
+#   open http://localhost:8080
+#
+# Every container logs through the Fluentd logging driver (async: a stopped
+# collector never blocks a container); files land in the fluentd-logs volume.
+
+x-logging: &fluentd-logging
+  driver: fluentd
+  options:
+    fluentd-address: "127.0.0.1:24224"
+    fluentd-async: "true"
+    tag: "docker.{{.Name}}"
+
+services:
+  fluentd:
+    build: { context: ., dockerfile: deploy/fluentd/Dockerfile }
+    ports: ["127.0.0.1:24224:24224"]   # the Docker daemon ships logs from the host side
+    volumes: [fluentd-logs:/fluentd/log]
+    restart: unless-stopped
+    mem_limit: 160m
+
+  mysql:
+    build: { context: ., dockerfile: deploy/mysql/Dockerfile }
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${FIHI_MYSQL_DATABASE:-fihi}
+      MYSQL_USER: ${FIHI_MYSQL_USER:-fihi}
+      MYSQL_PASSWORD: ${FIHI_MYSQL_PASSWORD:?set FIHI_MYSQL_PASSWORD in .env}
+    ports: ["127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306"]   # local tests / tools only
+    volumes: [mysql-data:/var/lib/mysql]
+    logging: *fluentd-logging
+    depends_on: [fluentd]
+    restart: unless-stopped
+    mem_limit: 384m
+
+  storage:
+    build: { context: ., dockerfile: deploy/garage/Dockerfile }
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?set GARAGE_RPC_SECRET in .env}
+      GARAGE_ACCESS_KEY: ${FIHI_S3_ACCESS_KEY:?set FIHI_S3_ACCESS_KEY in .env}
+      GARAGE_SECRET_KEY: ${FIHI_S3_SECRET_KEY:?set FIHI_S3_SECRET_KEY in .env}
+      GARAGE_BUCKET: ${FIHI_S3_BUCKET:-uploads}
+    ports: ["127.0.0.1:3900:3900"]   # S3 API for local tests only
+    volumes: [garage-data:/var/lib/garage]
+    logging: *fluentd-logging
+    depends_on: [fluentd]
+    restart: unless-stopped
+    mem_limit: 128m
+
+  search:
+    build: { context: ., dockerfile: deploy/search/Dockerfile }
+    environment:
+      MEILI_MASTER_KEY: ${FIHI_MEILI_KEY:?set FIHI_MEILI_KEY in .env}
+    ports: ["127.0.0.1:7700:7700"]   # local tests only
+    volumes: [meili-data:/meili_data]
+    logging: *fluentd-logging
+    depends_on: [fluentd]
+    restart: unless-stopped
+    mem_limit: 256m
+
+  backend:
+    build: { context: ., dockerfile: Dockerfile }
+    env_file: ["${FIHI_ENV_FILE:-.env}"]
+    environment:
+      FIHI_MYSQL_HOST: mysql
+      FIHI_S3_ENDPOINT: http://storage:3900
+      FIHI_MEILI_URL: http://search:7700
+      FIHI_FLUENTD_URL: ""   # logs already reach Fluentd through the logging driver
+      FIHI_PUBLIC_BASE_URL: ${FIHI_PUBLIC_BASE_URL:-http://localhost:8080}
+    logging: *fluentd-logging
+    depends_on:
+      mysql: { condition: service_healthy }
+      storage: { condition: service_started }
+      search: { condition: service_started }
+    restart: unless-stopped
+    mem_limit: 192m
+
+  frontend:
+    build: { context: ., dockerfile: deploy/frontend/Dockerfile }
+    environment:
+      PORT: "8080"
+      BACKEND_HOST: backend
+      STORAGE_HOST: storage
+      STORAGE_BUCKET: ${FIHI_S3_BUCKET:-uploads}
+      FLUENTD_SYSLOG: ${FLUENTD_SYSLOG:-}   # empty: the logging driver already ships nginx logs
+    ports: ["${HTTP_PORT:-8080}:8080"]
+    logging: *fluentd-logging
+    depends_on: [backend]
+    restart: unless-stopped
+    mem_limit: 32m
+
+volumes:
+  fluentd-logs:
+  mysql-data:
+  garage-data:
+  meili-data:

@@ -170,7 +170,7 @@
         DATA.categories = data.categories || [];
         DATA.featured = data.featured || [];
         if (data.settings) {
-          if (data.settings.whatsapp) WHATSAPP_NUMBER = String(data.settings.whatsapp).replace(/\D/g, '');
+          if (data.settings.whatsapp) applyPhone(data.settings.whatsapp);
           if (window.Delivery) Delivery.configure(data.settings);
         }
         loaded = true;
@@ -179,13 +179,32 @@
       .then(() => { loading = false; });
   }
 
+  /* The shop number is set by the admin: refresh every WhatsApp / phone link. */
+  function applyPhone(raw) {
+    const digits = String(raw || '').replace(/\D/g, '');
+    if (digits.length < 9) return;
+    WHATSAPP_NUMBER = digits;
+    $$('a[href^="https://wa.me/"]').forEach((a) => {
+      const u = new URL(a.href);
+      a.href = 'https://wa.me/' + digits + u.search;
+    });
+    $$('a[href^="tel:"]').forEach((a) => { a.href = 'tel:+' + digits; });
+    $$('[data-shop-phone]').forEach((el) => { el.textContent = phoneText(digits); });
+  }
+  // 212681771457 -> +212 681 771 457 (always left to right)
+  function phoneText(d) {
+    return d.startsWith('212') && d.length === 12
+      ? '+212 ' + d.slice(3, 6) + ' ' + d.slice(6, 9) + ' ' + d.slice(9)
+      : '+' + d;
+  }
+
   const allProducts = () => {
     const out = [];
     DATA.categories.forEach((c) => c.products.forEach((p) => out.push(Object.assign({}, p, { cat: c.id, img: p.img || c.img }))));
     return out;
   };
   const findProduct = (id) => allProducts().find((p) => p.id === id) || DATA.featured.find((p) => p.id === id);
-  const catImg = (slug) => { const c = DATA.categories.find((x) => x.id === slug); return c ? c.img : 'assets/cat-default.svg'; };
+  const catImg = (slug) => { const c = DATA.categories.find((x) => x.id === slug); return c ? c.img : '/media/cat-default.svg'; };
 
   /* ---------- i18n apply ---------- */
   function applyI18n() {
@@ -201,7 +220,7 @@
     $$('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle.replace(/-/g, '_')); });
     $$('[data-i18n-aria]').forEach((el) => { el.setAttribute('aria-label', t(el.dataset.i18nAria.replace(/-/g, '_'))); });
 
-    const ph = { searchInput: 'search_placeholder', searchLive: 'search_ph', checkoutName: 'checkout_name', checkoutPhone: 'checkout_phone',
+    const ph = { searchInput: 'search_placeholder', checkoutName: 'checkout_name', checkoutPhone: 'checkout_phone',
       checkoutCity: 'checkout_city', checkoutAddress: 'checkout_address', checkoutLocation: 'checkout_location' };
     Object.keys(ph).forEach((id) => {
       const el = document.getElementById(id);
@@ -222,7 +241,9 @@
 
   /* ---------- product cards ---------- */
   const validSizes = (p) => (p && p.sizes ? p.sizes : []).filter((s) => s && s.size);
-  const sizeLabel = (s) => String(s.size) + String(s.unit || '');
+  const sizeLabel = (s) => String(s.size) + String(s.unit || ''); // id sent to the server ("250g")
+  // shown to people as "<value> <unit>" (250 g) in every language, inside dir="ltr"
+  const sizeText = (id) => String(id || '').replace(/^([\d.,]+)\s*(g|kg|L)$/i, '$1 $2');
 
   function priceLabel(p) {
     const sp = validSizes(p).map((s) => Number(s.price)).filter((v) => !isNaN(v));
@@ -238,7 +259,7 @@
     const sizes = validSizes(p);
     if (!sizes.length) return '';
     return '<div class="prod-sizes" role="group" aria-label="' + esc(t('choose_size')) + '">' +
-      sizes.map((s) => '<button type="button" class="size-chip" dir="ltr" data-size="' + esc(sizeLabel(s)) + '" data-price="' + esc(s.price) + '">' + esc(sizeLabel(s)) + '</button>').join('') +
+      sizes.map((s) => '<button type="button" class="size-chip" dir="ltr" data-size="' + esc(sizeLabel(s)) + '" data-price="' + esc(s.price) + '">' + esc(sizeText(sizeLabel(s))) + '</button>').join('') +
       '</div>';
   }
 
@@ -390,7 +411,7 @@
     items.innerHTML = '<ul class="cart-items">' + cart.map((it, i) =>
       '<li class="cart-item">' +
       '  <img src="' + esc(it.img) + '" alt="">' +
-      '  <div class="cart-item-info"><b>' + esc(it.name) + (it.size ? ' <span class="size-tag" dir="ltr">' + esc(it.size) + '</span>' : '') + '</b>' +
+      '  <div class="cart-item-info"><b>' + esc(it.name) + (it.size ? ' <span class="size-tag" dir="ltr">' + esc(sizeText(it.size)) + '</span>' : '') + '</b>' +
       '    <span>' + esc(money(it.price)) + '</span>' +
       '    <div class="qty"><button type="button" data-dec="' + i + '" aria-label="' + esc(t('cart_dec')) + '">−</button><em>' + it.qty + '</em><button type="button" data-inc="' + i + '" aria-label="' + esc(t('cart_inc')) + '">+</button></div>' +
       '  </div>' +
@@ -460,7 +481,7 @@
   }
 
   function waMessage(order, c) {
-    const lines = order.items.map((it) => '• ' + it.qty + ' × ' + it.name + (it.size ? ' (' + it.size + ')' : '') + ' — ' + money(it.price * it.qty)).join('\n');
+    const lines = order.items.map((it) => '• ' + it.qty + ' × ' + it.name + (it.size ? ' (' + sizeText(it.size) + ')' : '') + ' — ' + money(it.price * it.qty)).join('\n');
     return t('wa_template')
       .replace('{ID}', order.order_id)
       .replace('{LINES}', lines)
@@ -559,21 +580,116 @@
   }
 
   /* ---------- search ---------- */
-  function openSearch() {
-    $('#searchPanel').classList.add('open');
-    const box = $('#searchLive');
-    box.value = $('#searchInput').value || '';
-    box.focus();
-    doSearch(box.value);
-  }
-  const closeSearch = () => $('#searchPanel').classList.remove('open');
+  /* Live search: results appear under the search box while typing (no button
+     needed), as a list of rows: image, name, price. The server ranks them
+     (Meilisearch: Arabic / French / English, typo tolerant); rows are drawn
+     from the catalog already loaded. If the API cannot be reached, a simple
+     local match keeps search usable. */
+  let searchTimer = 0;
+  let searchSeq = 0;
+  let searchHits = [];
+  let searchActive = -1;
+  const foldText = (x) => String(x || '').toLowerCase().normalize('NFKD')
+    .replace(/[\u0300-\u036f\u064b-\u065f\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي');
 
-  function doSearch(q) {
-    const res = $('#searchResults');
-    const ql = (q || '').trim().toLowerCase();
-    if (!ql) { res.innerHTML = '<div class="grid-empty">' + esc(t('search_hint')) + '</div>'; return; }
-    const hits = allProducts().filter((p) => p.name.toLowerCase().indexOf(ql) !== -1);
-    res.innerHTML = hits.length ? hits.map(cardHTML).join('') : '<div class="grid-empty">' + esc(t('no_results', q.trim())) + '</div>';
+  function localSearch(q) {
+    const words = foldText(q).split(/\s+/).filter(Boolean);
+    return allProducts().filter((p) => {
+      const hay = foldText([p.name, p.name_fr, p.name_en, p.description].join(' '));
+      return words.every((w) => hay.indexOf(w.replace(/^(وال|بال|ال)/, '')) !== -1);
+    });
+  }
+
+  function setSearchOpen(open) {
+    $('#searchResults').hidden = !open;
+    $('#searchInput').setAttribute('aria-expanded', String(open));
+    if (!open) setActive(-1);
+  }
+  const closeSearch = () => setSearchOpen(false);
+
+  function setActive(i) {
+    searchActive = i;
+    $$('#searchResults .sr-item').forEach((el, j) => {
+      el.classList.toggle('active', j === i);
+      el.setAttribute('aria-selected', String(j === i));
+      if (j === i) el.scrollIntoView({ block: 'nearest' });
+    });
+    const input = $('#searchInput');
+    if (i >= 0) input.setAttribute('aria-activedescendant', 'sr-' + i);
+    else input.removeAttribute('aria-activedescendant');
+  }
+
+  function showResults(q, hits) {
+    searchHits = hits.slice(0, 12);
+    const box = $('#searchResults');
+    box.innerHTML = searchHits.length
+      ? searchHits.map((p, i) =>
+        '<li class="sr-item" role="option" id="sr-' + i + '" data-id="' + esc(p.id) + '" aria-selected="false">' +
+        '<img src="' + esc(p.img || catImg(p.cat)) + '" alt="" loading="lazy" width="46" height="46">' +
+        '<span class="sr-name">' + esc(p.name) + '</span>' +
+        '<span class="sr-price">' + esc(priceLabel(p)) + '</span></li>').join('')
+      : '<li class="sr-empty" role="presentation">' + esc(t('no_results', q)) + '</li>';
+    setSearchOpen(true);
+    setActive(-1);
+  }
+
+  function runSearch(query, seq) {
+    fetch('/api/v1/search?q=' + encodeURIComponent(query) + '&limit=12', { cache: 'no-store' })
+      .then((r) => { if (!r.ok) throw new Error('api'); return r.json(); })
+      .then((data) => {
+        if (seq !== searchSeq) return; // a newer keystroke won
+        const byId = {};
+        allProducts().forEach((p) => { byId[p.id] = p; });
+        showResults(query, (data.ids || []).map((id) => byId[id]).filter(Boolean));
+      })
+      .catch(() => { if (seq === searchSeq) showResults(query, localSearch(query)); });
+  }
+
+  function doSearch(q, now) {
+    const query = (q || '').trim();
+    clearTimeout(searchTimer);
+    const seq = ++searchSeq;
+    if (!query) { closeSearch(); return; }
+    if (now) runSearch(query, seq);
+    else searchTimer = setTimeout(() => runSearch(query, seq), 150);
+  }
+
+  function pickResult(i) {
+    const p = searchHits[i];
+    if (!p) return;
+    closeSearch();
+    $('#searchInput').blur();
+    openDetails(p.id);
+  }
+
+  function initSearch() {
+    const input = $('#searchInput');
+    const box = $('#searchResults');
+    input.addEventListener('input', () => doSearch(input.value));
+    input.addEventListener('focus', () => { if (input.value.trim() && box.innerHTML) setSearchOpen(true); });
+    input.addEventListener('keydown', (e) => {
+      const open = !box.hidden && searchHits.length;
+      if (e.key === 'ArrowDown' && open) { e.preventDefault(); setActive((searchActive + 1) % searchHits.length); }
+      else if (e.key === 'ArrowUp' && open) { e.preventDefault(); setActive(searchActive <= 0 ? searchHits.length - 1 : searchActive - 1); }
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (open) pickResult(searchActive >= 0 ? searchActive : 0);
+        else doSearch(input.value, true);
+      }
+    });
+    // keep focus in the box while clicking a row, then open the product
+    box.addEventListener('mousedown', (e) => e.preventDefault());
+    box.addEventListener('click', (e) => {
+      const row = e.target.closest('.sr-item');
+      if (row) pickResult(Number(row.id.slice(3)));
+    });
+    box.addEventListener('mousemove', (e) => {
+      const row = e.target.closest('.sr-item');
+      if (row && Number(row.id.slice(3)) !== searchActive) setActive(Number(row.id.slice(3)));
+    });
+    $('#searchBtn').addEventListener('click', () => { input.focus(); doSearch(input.value, true); });
+    document.addEventListener('click', (e) => { if (!e.target.closest('.search')) closeSearch(); });
   }
 
   /* ---------- menus / drawers ---------- */
@@ -608,11 +724,7 @@
     $('#overlay').addEventListener('click', closeCart);
     $('#cartItems').addEventListener('click', onCartClick);
 
-    $('#searchBtn').addEventListener('click', openSearch);
-    $('#searchInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); openSearch(); } });
-    $('#closeSearch').addEventListener('click', closeSearch);
-    $('#searchLive').addEventListener('input', (e) => doSearch(e.target.value));
-    $('#searchPanel').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeSearch(); });
+    initSearch();
 
     $('#pdClose').addEventListener('click', closeDetails);
     $('#productModal').addEventListener('click', (e) => { if (e.target.id === 'productModal') closeDetails(); });
@@ -724,7 +836,7 @@
     const b = bot();
     if (!cart.length) return b.emptyCart;
     return b.cartHeader.replace('{n}', cartCount()) + '\n' +
-      cart.map((it) => '• ' + it.qty + ' × ' + it.name + (it.size ? ' (' + it.size + ')' : '')).join('\n') + '\n' +
+      cart.map((it) => '• ' + it.qty + ' × ' + it.name + (it.size ? ' (' + sizeText(it.size) + ')' : '')).join('\n') + '\n' +
       b.cartTotal.replace('{t}', money(cartSubtotal()));
   }
   function defaultQuicks() {

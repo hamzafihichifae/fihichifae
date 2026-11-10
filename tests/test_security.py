@@ -21,12 +21,11 @@ def test_limits_config():
     assert config.MIN_PASSWORD_LEN >= 8
 
 
-def test_reset_email_follows_the_environment_variable(monkeypatch):
+def test_reset_email_is_the_one_set_in_the_profile():
     from app import db
 
-    monkeypatch.setattr(config, "ADMIN_EMAIL_FROM_ENV", True)
-    monkeypatch.setattr(config, "DEFAULT_ADMIN_EMAIL", "owner@example.com")
-    with db.live_db() as conn:
+    with db.db_lock, db.live_db() as conn:
+        db.set_meta(conn, "admin_email", "owner@example.com")  # meta is restored after the test
         assert db.get_reset_email(conn) == "owner@example.com"
 
 

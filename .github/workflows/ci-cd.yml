@@ -1,10 +1,12 @@
 name: CI/CD — test, secure, build, performance, deploy (manual)
 
-# Every push / PR: lint, tests, security scans and Docker image build.
-# Push to main: + performance (load) test with a downloadable report.
-# "Run workflow" (Actions tab): choose a performance test and/or a deployment.
-# Deployment ONLY happens when you pick a target; the data lives on the
-# platform volume, so a deploy never touches it.
+# Every push / PR: lint, tests (against real MySQL + Garage + Meilisearch),
+# security scans and the five deployable Docker images.
+# Push to main: + performance (load) test of the whole stack, downloadable report.
+# "Run workflow" (Actions tab): choose a performance test and/or a Railway deploy.
+# Deployment ONLY happens when you ask for it; data lives on the services'
+# volumes (MySQL, storage, search), so a deploy never touches it.
+# Railway costs are checked daily by a separate workflow (railway-usage.yml).
 on:
   push:
     branches: [main, master]
@@ -12,11 +14,14 @@ on:
     branches: [main, master]
   workflow_dispatch:
     inputs:
-      target:
-        description: "Deploy to (none = do not deploy)"
-        type: choice
-        options: [none, railway, fly, render]
-        default: none
+      deploy:
+        description: "Deploy to Railway"
+        type: boolean
+        default: false
+      services:
+        description: "Railway services to deploy (comma separated)"
+        type: string
+        default: "backend,frontend"
       run_perf:
         description: "Run the performance (load) test"
         type: boolean
@@ -30,11 +35,11 @@ on:
         type: string
         default: "60"
       perf_cpus:
-        description: "vCPUs given to the app container"
+        description: "vCPUs given to the backend container"
         type: string
         default: "1"
       perf_memory:
-        description: "RAM limit of the app container"
+        description: "RAM limit of the backend container"
         type: string
         default: "512m"
 
@@ -47,7 +52,6 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
-  IMAGE_NAME: fihi-chifae
 
 jobs:
   lint-test:
@@ -69,8 +73,23 @@ jobs:
         run: ruff check app server.py docker-entrypoint.py
       - name: Format check (black)
         run: black --check app server.py tests
+      - name: Start MySQL, Garage and Meilisearch (throw-away secrets)
+        run: |
+          rnd() { python -c "import secrets,sys; print(secrets.token_hex(int(sys.argv[1])))" "$1"; }
+          sed -e "s/^FIHI_MYSQL_PASSWORD=.*/FIHI_MYSQL_PASSWORD=$(rnd 16)/" \
+              -e "s/^MYSQL_ROOT_PASSWORD=.*/MYSQL_ROOT_PASSWORD=$(rnd 16)/" \
+              -e "s/^FIHI_S3_ACCESS_KEY=.*/FIHI_S3_ACCESS_KEY=GK$(rnd 12)/" \
+              -e "s/^FIHI_S3_SECRET_KEY=.*/FIHI_S3_SECRET_KEY=$(rnd 32)/" \
+              -e "s/^GARAGE_RPC_SECRET=.*/GARAGE_RPC_SECRET=$(rnd 32)/" \
+              -e "s/^FIHI_MEILI_KEY=.*/FIHI_MEILI_KEY=$(rnd 16)/" \
+              -e "s/^FIHI_ENV=.*/FIHI_ENV=development/" \
+              .env.example > .env
+          docker compose up -d --build --wait fluentd mysql storage search
       - name: Tests + coverage (each test deletes the data it creates)
         run: pytest --cov=app --cov-report=term-missing --cov-report=xml
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs --tail 80 mysql storage search
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -117,13 +136,22 @@ jobs:
       - uses: github/codeql-action/analyze@v3
 
   build:
-    name: Docker image
+    name: Docker image (${{ matrix.service }})
     runs-on: ubuntu-latest
     needs: [lint-test, security]
     permissions:
       contents: read
       packages: write
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { service: backend, dockerfile: Dockerfile }
+          - { service: frontend, dockerfile: deploy/frontend/Dockerfile }
+          - { service: mysql, dockerfile: deploy/mysql/Dockerfile }
+          - { service: storage, dockerfile: deploy/garage/Dockerfile }
+          - { service: search, dockerfile: deploy/search/Dockerfile }
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -136,19 +164,20 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}
+          images: ghcr.io/${{ github.repository }}/fihi-chifae-${{ matrix.service }}
           tags: |
             type=sha,format=short
             type=raw,value=latest,enable={{is_default_branch}}
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name != 'pull_request' }}
           load: ${{ github.event_name == 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
       - name: Trivy scan (HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         continue-on-error: true
@@ -163,16 +192,17 @@ jobs:
         continue-on-error: true
         with:
           sarif_file: trivy.sarif
+          category: trivy-${{ matrix.service }}
 
   # ───────────────────────────── performance ─────────────────────────────
   performance:
-    name: Performance (Locust load test)
+    name: Performance (Locust load test, whole stack)
     if: >-
       (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
       || (github.event_name == 'workflow_dispatch' && inputs.run_perf)
     needs: [lint-test]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -181,8 +211,6 @@ jobs:
           cache: pip
       - name: Install Locust + report tooling
         run: pip install -r perf/requirements.txt
-      - name: Build the production image
-        run: docker build -t fihi-chifae:perf .
       - name: Load test (stages of concurrent users) + resource sampling
         env:
           PERF_USERS: ${{ inputs.perf_users || '5,100,1000' }}
@@ -200,10 +228,10 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-  # ─────────────────────────── manual deployments ───────────────────────────
+  # ─────────────────────────── manual deployment ───────────────────────────
   deploy-railway:
     name: Deploy → Railway
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'railway'
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
     needs: [lint-test, security]
     runs-on: ubuntu-latest
     environment: production
@@ -212,52 +240,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Deploy with the Railway CLI (volume /data is kept)
+      - name: Deploy each service with the Railway CLI (volumes are kept)
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          SERVICES: ${{ inputs.services }}
         run: |
-          if [ -z "$RAILWAY_TOKEN" ] || [ -z "$RAILWAY_SERVICE" ]; then
-            echo "::error::Set the RAILWAY_TOKEN secret and the RAILWAY_SERVICE variable (see deployment-guide.md)"
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "::error::Set the RAILWAY_TOKEN secret (see deployment-guide.md)"
             exit 1
           fi
           npm install -g @railway/cli
-          railway up --service "$RAILWAY_SERVICE" --ci
+          for svc in ${SERVICES//,/ }; do
+            echo "::group::railway up --service $svc"
+            railway up --service "$svc" --ci
+            echo "::endgroup::"
+          done
       - name: Smoke test
         if: vars.PUBLIC_URL != ''
         run: |
           for i in $(seq 1 30); do
-            curl -fsS "${{ vars.PUBLIC_URL }}/api/v1/ping" && exit 0
+            curl -fsS "${{ vars.PUBLIC_URL }}/api/v1/ping" && curl -fsS "${{ vars.PUBLIC_URL }}/healthz" && exit 0
             sleep 10
           done
           exit 1
-
-  deploy-fly:
-    name: Deploy → Fly.io
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'fly'
-    needs: [lint-test, security]
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Deploy (volume fihi_data is kept)
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          if [ -z "$FLY_API_TOKEN" ]; then echo "::error::Set the FLY_API_TOKEN secret"; exit 1; fi
-          flyctl deploy --remote-only --ha=false
-
-  deploy-render:
-    name: Deploy → Render
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'render'
-    needs: [lint-test, security]
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - name: Trigger the Render deploy hook (disk /data is kept)
-        env:
-          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
-        run: |
-          if [ -z "$RENDER_DEPLOY_HOOK" ]; then echo "::error::Set the RENDER_DEPLOY_HOOK secret"; exit 1; fi
-          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"

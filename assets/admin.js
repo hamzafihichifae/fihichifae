@@ -35,6 +35,8 @@
     return d.length >= 9 ? d : '';
   }
   function safeUrl(u) { return /^https?:\/\//i.test(String(u || '')) ? String(u) : ''; }
+  // stored size id "250g" is shown as "250 g" (value then unit, in every language)
+  const sizeText = (s) => String(s || '').replace(/^([\d.,]+)\s*(g|kg|L)$/i, '$1 $2');
 
   function whenChart(cb) {
     if (window.Chart) return cb();
@@ -121,22 +123,91 @@
   }
 
   /* ---------------- orders ---------------- */
+  let customer = '';   // active customer filter ('' = everyone)
+  let allTime = false; // that customer's whole history instead of the date range
+  let ordersSeq = 0;   // ignore answers of superseded requests
+
   async function loadOrders() {
     const from = $('#ordersFrom').value, to = $('#ordersTo').value;
     const b = currentMonthBounds();
-    $('#ordersTitle').textContent = from === b.from && to === b.to ? 'طلبات هذا الشهر'
-      : 'الطلبات' + (from ? ' من ' + from : '') + (to ? ' إلى ' + to : '');
+    const period = from === b.from && to === b.to ? 'هذا الشهر'
+      : (from ? 'من ' + from : '') + (to ? ' إلى ' + to : '');
+    $('#ordersTitle').textContent = customer
+      ? (allTime ? 'كل طلبات « ' + customer + ' »' : 'طلبات « ' + customer + ' » · ' + period)
+      : (period === 'هذا الشهر' ? 'طلبات هذا الشهر' : 'الطلبات ' + period);
     const qs = new URLSearchParams();
-    if (from) qs.set('from', from);
-    if (to) qs.set('to', to);
+    if (customer) qs.set('buyer', customer);
+    if (customer && allTime) qs.set('all', '1');
+    else {
+      if (from) qs.set('from', from);
+      if (to) qs.set('to', to);
+    }
+    const seq = ++ordersSeq;
+    let data;
     try {
-      const data = await apiJson('/api/v1/orders?' + qs.toString());
-      orders = data.orders || [];
+      data = await apiJson('/api/v1/orders?' + qs.toString());
     } catch (e) {
-      if (e.status !== 401) $('#ordersList').innerHTML = '<p class="empty">' + esc(e.message) + '</p>';
+      if (e.status !== 401 && seq === ordersSeq) $('#ordersList').innerHTML = '<p class="empty">' + esc(e.message) + '</p>';
       return;
     }
+    if (seq !== ordersSeq) return;
+    orders = data.orders || [];
+    renderCustomerSummary(customer && allTime ? data.customer : null);
     renderOrders();
+  }
+
+  function renderCustomerSummary(c) {
+    const box = $('#customerSummary');
+    if (!c) { box.hidden = true; box.innerHTML = ''; return; }
+    const item = (label, value, cls) => '<div class="cs-item' + (cls ? ' ' + cls : '') + '"><span>' + label + '</span><b>' + esc(value) + '</b></div>';
+    box.innerHTML =
+      item('الزبون', c.buyer, 'cs-name') +
+      item('عدد الطلبات', c.orders + (c.orders === c.confirmed ? '' : ' (' + c.confirmed + ' مؤكد)')) +
+      item('أول طلب', c.first_order ? fmtDate(c.first_order).slice(0, 10) : '—') +
+      item('آخر طلب', c.last_order ? fmtDate(c.last_order).slice(0, 10) : '—') +
+      item('مجموع المؤكد', mad(c.confirmed_total));
+    box.hidden = false;
+  }
+
+  /* customer filter: suggestions while typing, applied on pick / Enter */
+  let suggestTimer = 0;
+  function suggestCustomers() {
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(async () => {
+      const q = $('#customerFilter').value.trim();
+      try {
+        const data = await apiJson('/api/v1/orders/customers?q=' + encodeURIComponent(q));
+        $('#customerList').innerHTML = (data.customers || []).map((c) =>
+          '<option value="' + esc(c.buyer) + '" label="' + esc((c.phone ? c.phone + ' · ' : '') + c.orders + ' طلب') + '"></option>').join('');
+      } catch (e) { /* suggestions are optional */ }
+    }, 200);
+  }
+
+  function applyCustomer() {
+    const value = $('#customerFilter').value.trim();
+    if (value === customer) return;
+    customer = value;
+    if (!customer) allTime = false;
+    syncCustomerControls();
+    loadOrders();
+  }
+
+  function syncCustomerControls() {
+    $('#customerAllTime').disabled = !customer;
+    $('#customerAllTime').checked = allTime;
+    $('#customerClear').hidden = !customer;
+    $('#ordersFrom').disabled = $('#ordersTo').disabled = $('#ordersResetBtn').disabled = !!(customer && allTime);
+  }
+
+  function initCustomerFilter() {
+    const input = $('#customerFilter');
+    input.addEventListener('input', () => { suggestCustomers(); if (!input.value.trim()) applyCustomer(); });
+    input.addEventListener('focus', suggestCustomers);
+    input.addEventListener('change', applyCustomer);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applyCustomer(); } });
+    $('#customerAllTime').addEventListener('change', (e) => { allTime = e.target.checked; syncCustomerControls(); loadOrders(); });
+    $('#customerClear').addEventListener('click', () => { input.value = ''; allTime = false; applyCustomer(); });
+    syncCustomerControls();
   }
 
   function renderOrders() {
@@ -149,7 +220,7 @@
 
     const box = $('#ordersList');
     if (!list.length) {
-      box.innerHTML = '<p class="empty">لا توجد طلبات في هذه الفترة.</p>';
+      box.innerHTML = '<p class="empty">' + (customer ? 'لا توجد طلبات لهذا الزبون في هذه الفترة.' : 'لا توجد طلبات في هذه الفترة.') + '</p>';
     } else {
       box.innerHTML = list.map(orderHTML).join('');
     }
@@ -175,7 +246,7 @@
         '</div>'
       : '';
     const rows = o.items.map((it) =>
-      '<tr><td>' + esc(it.product_name) + (it.size ? ' <span class="chip" dir="ltr">' + esc(it.size) + '</span>' : '') + '</td>' +
+      '<tr><td>' + esc(it.product_name) + (it.size ? ' <span class="chip" dir="ltr">' + esc(sizeText(it.size)) + '</span>' : '') + '</td>' +
       '<td><span class="cat-tag">' + esc(catLabel(it.cat)) + '</span></td>' +
       '<td class="num">' + mad(it.price) + ' × ' + Number(it.qty) + '</td>' +
       '<td class="num"><b>' + mad((Number(it.price) || 0) * (Number(it.qty) || 0)) + '</b></td></tr>'
@@ -416,6 +487,7 @@
       renderOrders();
     }));
     $('#ordersList').addEventListener('click', onOrderAction);
+    initCustomerFilter();
     $('#btnExport').addEventListener('click', exportExcel);
     $('#btnBackup').addEventListener('click', backup);
     initManualOrder();

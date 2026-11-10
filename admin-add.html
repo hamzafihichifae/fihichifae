@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <title>المنتجات والفئات - فيه شفاء</title>
-  <link rel="icon" href="assets/logo.jpg" type="image/jpeg">
+  <link rel="icon" href="/media/logo.jpg" type="image/jpeg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="assets/admin-auth.css?v=6">
-  <link rel="stylesheet" href="assets/admin.css?v=1">
+  <link rel="stylesheet" href="assets/admin-auth.css?v=7">
+  <link rel="stylesheet" href="assets/admin.css?v=2">
   <style>
     .wrap{max-width:64rem}
     .form-grid{display:grid;gap:1rem}
@@ -31,7 +31,10 @@
 
     .sizes-box{border:1.5px dashed var(--green-200);border-radius:12px;padding:.7rem;background:var(--green-50)}
     .sizes-list{display:grid;gap:.45rem;margin-bottom:.55rem}
-    .size-row{display:grid;grid-template-columns:1fr 6.5rem 1fr 2.2rem;gap:.45rem;align-items:center}
+    .size-row{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr) 2.2rem;gap:.45rem;align-items:center}
+    /* "<value> <unit>" always reads left to right (250 g), whatever the page direction */
+    .sr-qty{display:grid;grid-template-columns:minmax(0,1fr) 6.8rem;gap:.45rem}
+    @media(max-width:420px){.size-row{grid-template-columns:1fr 2.2rem}.size-row .sr-price{grid-column:1}.sr-qty{grid-template-columns:minmax(0,1fr) 6.2rem}}
 
     .list{display:grid;gap:.6rem}
     .row{background:#fff;border:1px solid var(--line);border-radius:12px;padding:.55rem .8rem}
@@ -60,7 +63,7 @@
 
   <header class="top">
     <div class="brand">
-      <img src="assets/logo.jpg" alt="شعار فيه شفاء">
+      <img src="/media/logo.jpg" alt="شعار فيه شفاء">
       <span>فيه <b>شفاء</b> · المنتجات والفئات</span>
     </div>
     <nav class="top-actions" aria-label="إجراءات">
@@ -100,6 +103,15 @@
           <label for="fName">اسم المنتج <span class="req">*</span></label>
           <input type="text" id="fName" class="input" maxlength="80" placeholder="مثال: عسل الجبل الخالص" required>
         </div>
+        <div class="field">
+          <label for="fNameFr">الاسم بالفرنسية (اختياري)</label>
+          <input type="text" id="fNameFr" class="input" maxlength="80" dir="ltr" placeholder="ex : Miel de montagne" aria-describedby="altNameHint">
+        </div>
+        <div class="field">
+          <label for="fNameEn">الاسم بالإنجليزية (اختياري)</label>
+          <input type="text" id="fNameEn" class="input" maxlength="80" dir="ltr" placeholder="e.g. Mountain honey" aria-describedby="altNameHint">
+        </div>
+        <p class="hint full" id="altNameHint" style="margin-top:-.4rem">يُستعمل للبحث فقط: يجد الزبون المنتج إذا بحث بالفرنسية أو الإنجليزية.</p>
         <div class="field full">
           <label for="fDesc">الوصف (يظهر للزبون)</label>
           <textarea id="fDesc" class="input" maxlength="2000" placeholder="الأصل، طريقة الاستعمال، المميزات…"></textarea>
@@ -109,7 +121,7 @@
           <div class="sizes-box">
             <div class="sizes-list" id="sizesList"></div>
             <button type="button" class="btn-soft sm" data-add-size>+ إضافة حجم</button>
-            <p class="hint" style="margin-top:.5rem">اتركه فارغاً لتطبيق الأحجام الافتراضية من السعر: <b>1 كغ</b> و<b>0.5 كغ</b> (نصف السعر)، وللزيوت <b>1 ل</b> و<b>5 ل</b>.</p>
+            <p class="hint" style="margin-top:.5rem">اتركه فارغاً لتطبيق الأحجام الافتراضية من السعر: <bdi dir="ltr"><b>1 kg</b></bdi> و <bdi dir="ltr"><b>0.5 kg</b></bdi> بنصف السعر، وللزيوت <bdi dir="ltr"><b>1 L</b></bdi> و <bdi dir="ltr"><b>5 L</b></bdi>.<br>الوحدات المتاحة: <bdi dir="ltr"><b>g</b></bdi> (غرام) · <bdi dir="ltr"><b>kg</b></bdi> (كيلوغرام) · <bdi dir="ltr"><b>L</b></bdi> (لتر).</p>
           </div>
         </div>
         <div class="field full">
@@ -146,7 +158,7 @@
     </section>
   </main>
 
-  <script src="assets/admin-auth.js?v=5"></script>
-  <script src="assets/admin-add.js?v=11"></script>
+  <script src="assets/admin-auth.js?v=6"></script>
+  <script src="assets/admin-add.js?v=12"></script>
 </body>
 </html>

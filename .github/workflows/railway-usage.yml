@@ -1,0 +1,55 @@
+name: Railway usage — daily cost check
+
+# Independent of CI/CD: it only reads billing data, never builds or deploys.
+# Every day it reports the Railway usage of the current billing period, the
+# projected bill and how close it is to the budget (Hobby plan included usage,
+# or your usage limit). The run FAILS when the projection reaches
+# RAILWAY_WARN_PCT % of the budget, so GitHub e-mails you.
+#
+# Setup (repo → Settings → Secrets and variables → Actions):
+#   secret   RAILWAY_API_TOKEN     Railway → Account Settings → Tokens (account or
+#                                  workspace token; a project token cannot read billing)
+#   variable RAILWAY_WORKSPACE_ID  optional (default: the token's first workspace)
+#   variable RAILWAY_WARN_PCT      optional, default 80
+#   variable RAILWAY_BUDGET_USD    optional, overrides the budget
+on:
+  schedule:
+    - cron: "0 7 * * *" # every day 07:00 UTC (08:00 Morocco)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-usage
+  cancel-in-progress: false
+
+jobs:
+  usage:
+    name: Consumption & cost
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/railway_usage.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check Railway usage against the budget
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_WORKSPACE_ID: ${{ vars.RAILWAY_WORKSPACE_ID }}
+          RAILWAY_WARN_PCT: ${{ vars.RAILWAY_WARN_PCT || '80' }}
+          RAILWAY_BUDGET_USD: ${{ vars.RAILWAY_BUDGET_USD }}
+        run: python scripts/railway_usage.py
+      - name: Keep the daily figures (90 days)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: railway-usage-${{ github.run_number }}
+          path: usage.json
+          retention-days: 90
+          if-no-files-found: ignore

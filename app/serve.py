@@ -9,8 +9,10 @@ Design notes
 - State-changing requests carrying a foreign ``Origin`` are refused (CSRF).
 - Only an explicit set of files is served: the public pages and ``assets/``.
   Databases, source code and dotfiles are never reachable over HTTP.
-- Login, order placement and newsletter sign-up are rate limited per client
-  IP (taken from X-Forwarded-For when running behind the platform proxy).
+- Login, order placement, newsletter sign-up and search are rate limited per
+  client IP (taken from X-Forwarded-For when running behind the proxy).
+- In production the nginx frontend serves the pages and images; this server
+  then only answers /api/v1 (static serving stays for local development).
 """
 
 import argparse
@@ -21,21 +23,25 @@ import json
 import mimetypes
 import os
 import re
-import sys
+import socket
 import time
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import catalog, config, mailer, orders, sales
+from . import account, catalog, config, logs, mailer, orders, sales, search, storage
 from . import db as database
 from .catalog import StoreError
 from .security import SECURITY_HEADERS, LoginThrottle
+
+log = logs.get("http")
 
 _login_throttle = LoginThrottle()
 _reset_throttle = LoginThrottle(max_attempts=3, window=900)
 _order_throttle = LoginThrottle(config.ORDER_MAX_PER_WINDOW, config.ORDER_WINDOW)
 _newsletter_throttle = LoginThrottle(config.NEWSLETTER_MAX_PER_WINDOW, config.NEWSLETTER_WINDOW)
+_search_throttle = LoginThrottle(config.SEARCH_MAX_PER_WINDOW, config.SEARCH_WINDOW)
+_profile_throttle = LoginThrottle(max_attempts=5, window=900)
 
 # Pre-encoded public catalog, rebuilt when the catalog version changes (or
 # after CATALOG_CACHE_TTL seconds as a safety net).
@@ -45,7 +51,7 @@ _catalog_cache = {"version": None, "expires": 0.0, "body": b"", "etag": ""}
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 _EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$")
 _ASSET_RE = re.compile(r"^/assets/([A-Za-z0-9_.-]+)$")
-_UPLOAD_RE = re.compile(r"^/assets/uploads/([A-Za-z0-9_.-]+)$")
+_MEDIA_RE = re.compile(r"^/(?:media|assets/uploads)/([A-Za-z0-9_.-]+)$")
 
 LOGIN_PAGE = "/admin-login.html"
 PUBLIC_PAGES = {
@@ -73,17 +79,23 @@ mimetypes.add_type("application/javascript", ".js")
 _ROUTES = [
     ("GET", r"/api/v1/ping", "_h_ping"),
     ("GET", r"/api/v1/catalog", "_h_catalog"),
+    ("GET", r"/api/v1/settings", "_h_settings"),
+    ("GET", r"/api/v1/search", "_h_search"),
     ("POST", r"/api/v1/orders", "_h_create_order"),
     ("POST", r"/api/v1/newsletter", "_h_newsletter"),
     ("GET", r"/api/v1/admin/session", "_h_admin_session"),
     ("POST", r"/api/v1/admin/session", "_h_admin_login"),
     ("DELETE", r"/api/v1/admin/session", "_h_admin_logout"),
-    ("POST", r"/api/v1/admin/verify-mfa", "_h_admin_mfa"),
     ("POST", r"/api/v1/admin/reset/request", "_h_reset_request"),
     ("POST", r"/api/v1/admin/reset/confirm", "_h_reset_confirm"),
+    ("GET", r"/api/v1/admin/profile", "_h_profile"),
+    ("PUT", r"/api/v1/admin/profile", "_h_update_profile"),
+    ("POST", r"/api/v1/admin/profile/avatar", "_h_set_avatar"),
+    ("DELETE", r"/api/v1/admin/profile/avatar", "_h_remove_avatar"),
     ("GET", r"/api/v1/sales/summary", "_h_sales_summary"),
     ("GET", r"/api/v1/sales/export", "_h_sales_export"),
     ("GET", r"/api/v1/orders", "_h_list_orders"),
+    ("GET", r"/api/v1/orders/customers", "_h_list_customers"),
     ("POST", r"/api/v1/admin/orders", "_h_admin_create_order"),
     ("POST", r"/api/v1/orders/([^/]+)/confirm", "_h_confirm_order"),
     ("POST", r"/api/v1/orders/([^/]+)/reject", "_h_reject_order"),
@@ -91,9 +103,7 @@ _ROUTES = [
     ("DELETE", r"/api/v1/categories/([^/]+)", "_h_delete_category"),
     ("POST", r"/api/v1/products", "_h_add_product"),
     ("PUT", r"/api/v1/products/([^/]+)", "_h_update_product"),
-    ("POST", r"/api/v1/products/([^/]+)/update", "_h_update_product"),
     ("DELETE", r"/api/v1/products/([^/]+)", "_h_delete_product"),
-    ("POST", r"/api/v1/products/([^/]+)/revoke", "_h_delete_product"),
     ("GET", r"/api/v1/archive", "_h_archive"),
     ("GET", r"/api/v1/admin/backup", "_h_backup"),
     ("POST", r"/api/v1/archive/products/([^/]+)/restore", "_h_restore_product"),
@@ -124,7 +134,20 @@ class AppHandler(BaseHTTPRequestHandler):
         return urllib.parse.urlparse(self.path).path
 
     def log_message(self, fmt, *args):
-        sys.stderr.write(f"[{self.log_date_time_string()}] {self._client_ip()} -- {fmt % args}\n")
+        log.info(fmt % args, extra={"ip": self._client_ip()})
+
+    def log_request(self, code="-", size="-"):
+        started = getattr(self, "_started", None)
+        log.info(
+            "request",
+            extra={
+                "method": self.command,
+                "path": self._path,
+                "status": int(code) if str(code).isdigit() else code,
+                "ip": self._client_ip(),
+                "ms": round((time.perf_counter() - started) * 1000, 1) if started else None,
+            },
+        )
 
     # ------------------------------------------------------------- helpers
     def _client_ip(self):
@@ -254,6 +277,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------- dispatch
     def _dispatch(self, method):
+        self._started = time.perf_counter()
         path = self._path
         func, match = _route(method, path)
         if func:
@@ -298,8 +322,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self._error(exc.status, exc.code, exc.message, **exc.extra)
         except (BrokenPipeError, ConnectionResetError):
             pass
-        except Exception as exc:  # never leak internals to the client
-            sys.stderr.write(f"[error] {self.command} {self._path}: {exc!r}\n")
+        except Exception:  # never leak internals to the client
+            log.exception("unhandled error", extra={"method": self.command, "path": self._path})
             try:
                 self._error(500, "internal_error", "خطأ داخلي في الخادم")
             except Exception:  # noqa: S110  # nosec B110 - best-effort reply
@@ -324,17 +348,30 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send_file(os.path.join(config.BASE, PUBLIC_PAGES[path]))
             return
         if path == "/favicon.ico":
-            self._send_file(os.path.join(config.BASE, "assets", "logo.jpg"))
+            self._send_media("logo.jpg")
             return
-        m = _UPLOAD_RE.match(path)
-        if m:
-            self._send_file(os.path.join(config.UPLOAD_DIR, m.group(1)), immutable=True)
+        m = _MEDIA_RE.match(path)
+        if m:  # production: nginx serves /media/* straight from the bucket
+            self._send_media(m.group(1))
             return
         m = _ASSET_RE.match(path)
         if m and not m.group(1).startswith("."):
             self._send_file(os.path.join(config.BASE, "assets", m.group(1)))
             return
         self._not_found()
+
+    def _send_media(self, name):
+        data = storage.get(name)
+        if data is None:
+            self._not_found()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", storage.content_type(name))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def _not_found(self):
         body = "404 - الصفحة غير موجودة".encode()
@@ -395,15 +432,7 @@ class AppHandler(BaseHTTPRequestHandler):
         version = catalog.catalog_version()
         if cache["version"] != version or time.time() > cache["expires"]:
             data = catalog.grouped_catalog()
-            data["settings"] = {
-                "whatsapp": config.WHATSAPP_NUMBER,
-                "delivery_fee": config.DELIVERY_FEE,
-                "free_delivery_threshold": config.FREE_DELIVERY_THRESHOLD,
-                "free_delivery_cities": [
-                    config.FREE_DELIVERY_CITY_LATIN,
-                    config.FREE_DELIVERY_CITY_AR,
-                ],
-            }
+            data["settings"] = _public_settings()
             body = json.dumps(data, ensure_ascii=False).encode("utf-8")
             cache.update(
                 version=version,
@@ -426,6 +455,32 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    def _h_settings(self, match):
+        body = json.dumps(_public_settings(), ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "public, max-age=60")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _h_search(self, match):
+        ip = self._client_ip()
+        if self._rate_limited(_search_throttle, ip, "طلبات بحث كثيرة، يرجى المحاولة لاحقاً"):
+            return
+        _search_throttle.record_failure(ip)  # counts searches
+        query = self._query()
+        try:
+            limit = int(query.get("limit", "24") or 24)
+        except ValueError:
+            limit = 24
+        self._json(200, search.search(query.get("q", ""), limit))
+
+    def _query(self):
+        parsed = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        return {k: (v[0] if v else "") for k, v in parsed.items()}
 
     def _h_create_order(self, match):
         ip = self._client_ip()
@@ -465,11 +520,13 @@ class AppHandler(BaseHTTPRequestHandler):
         if not session:
             self._error(401, "unauthorized", "المصادقة مطلوبة", auth_required=True)
             return
+        prof = account.profile()
         self._json(
             200,
             {
                 "ok": True,
-                "user": session["user"],
+                "user": prof["username"] or session["user"],
+                "avatar": prof["avatar"],
                 "expires_in": max(0, int(session["expires"] - time.time())),
             },
         )
@@ -496,7 +553,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         with database.live_db() as conn:
             ok = database.verify_admin_password(conn, username, password)
-            mfa = database.is_mfa_enabled(conn)
+            username = database.get_meta(conn, "admin_user", username)
         if not ok:
             _login_throttle.record_failure(ip)
             self._error(
@@ -507,9 +564,6 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             return
         _login_throttle.success(ip)
-        if mfa:
-            self._json(200, {"mfa_required": True, "message": "أدخل رمز التحقق"})
-            return
         token = database.create_session(username, ip)
         self._json(
             200,
@@ -520,9 +574,6 @@ class AppHandler(BaseHTTPRequestHandler):
     def _h_admin_logout(self, match):
         database.delete_session(self._session_token())
         self._json(200, {"ok": True}, headers={"Set-Cookie": self._cookie("", 0)})
-
-    def _h_admin_mfa(self, match):
-        self._error(501, "mfa_not_available", "التحقق بخطوتين غير مفعل بعد", mfa_coming=True)
 
     def _reset_link(self, token):
         base = config.PUBLIC_BASE_URL
@@ -549,7 +600,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 if link:
                     mailer.send_password_reset(email_addr, link)
                 else:
-                    sys.stderr.write("[auth] FIHI_PUBLIC_BASE_URL not set: reset e-mail not sent\n")
+                    log.error("FIHI_PUBLIC_BASE_URL not set: reset e-mail not sent")
         # identical response whether or not the e-mail exists (no enumeration)
         self._json(200, {"ok": True, "message": "إذا كان البريد مسجلاً، سيتم إرسال رابط الاستعادة"})
 
@@ -575,6 +626,52 @@ class AppHandler(BaseHTTPRequestHandler):
             database.set_admin_password(conn, new_password)
         database.delete_all_sessions()
         self._json(200, {"ok": True, "message": "تم تحديث كلمة المرور، يرجى تسجيل الدخول"})
+
+    # ----------------------------------------------------------- profile
+    def _h_profile(self, match):
+        if self._require_admin() is None:
+            return
+        self._json(200, {"profile": account.profile()})
+
+    def _h_update_profile(self, match):
+        if self._require_admin() is None:
+            return
+        key = "profile:" + self._client_ip()
+        if self._rate_limited(_profile_throttle, key, "محاولات كثيرة، يرجى المحاولة لاحقاً"):
+            return
+        payload = self._body_json(config.MAX_SMALL_BODY)
+        if payload is None:
+            return
+        try:
+            prof, signed_out = account.update_profile(payload, self._session_token())
+        except StoreError as exc:
+            if exc.code == "wrong_password":
+                _profile_throttle.record_failure(key)
+            raise
+        _profile_throttle.success(key)
+        log.info(
+            "admin profile updated",
+            extra={
+                "fields": sorted(
+                    k for k in payload if k != "current_password" and k != "new_password"
+                )
+                + (["password"] if "new_password" in payload else [])
+            },
+        )
+        self._json(200, {"ok": True, "profile": prof, "other_sessions_closed": signed_out})
+
+    def _h_set_avatar(self, match):
+        if self._require_admin() is None:
+            return
+        payload = self._body_json(config.MAX_SMALL_BODY + config.MAX_AVATAR_BYTES * 2)
+        if payload is None:
+            return
+        self._json(200, {"ok": True, "profile": account.set_avatar(payload.get("img"))})
+
+    def _h_remove_avatar(self, match):
+        if self._require_admin() is None:
+            return
+        self._json(200, {"ok": True, "profile": account.remove_avatar()})
 
     # ------------------------------------------------------------- admin
     def _h_sales_summary(self, match):
@@ -605,10 +702,20 @@ class AppHandler(BaseHTTPRequestHandler):
     def _h_list_orders(self, match):
         if self._require_admin() is None:
             return
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        date_from = (query.get("from") or [""])[0] or None
-        date_to = (query.get("to") or [""])[0] or None
-        self._json(200, {"orders": orders.list_orders(date_from, date_to)})
+        query = self._query()
+        buyer = query.get("buyer", "").strip()
+        all_time = buyer and query.get("all") == "1"  # a customer's whole history
+        date_from = None if all_time else (query.get("from") or None)
+        date_to = None if all_time else (query.get("to") or None)
+        result = {"orders": orders.list_orders(date_from, date_to, buyer or None)}
+        if buyer:
+            result["customer"] = orders.customer_summary(buyer)
+        self._json(200, result)
+
+    def _h_list_customers(self, match):
+        if self._require_admin() is None:
+            return
+        self._json(200, {"customers": orders.list_customers(self._query().get("q", ""))})
 
     def _h_admin_create_order(self, match):
         if self._require_admin() is None:
@@ -663,6 +770,8 @@ class AppHandler(BaseHTTPRequestHandler):
             str(payload.get("img", "") or ""),
             sizes=payload.get("sizes"),
             description=str(payload.get("description", "") or ""),
+            name_fr=str(payload.get("name_fr", "") or ""),
+            name_en=str(payload.get("name_en", "") or ""),
         )
         self._json(201, result)
 
@@ -686,6 +795,8 @@ class AppHandler(BaseHTTPRequestHandler):
             img_source=opt("img") or None,
             sizes=payload.get("sizes") if "sizes" in payload else None,
             description=opt("description"),
+            name_fr=opt("name_fr"),
+            name_en=opt("name_en"),
         )
         self._json(200, result)
 
@@ -722,10 +833,6 @@ class AppHandler(BaseHTTPRequestHandler):
         self._json(200, catalog.restore_product(match.group(1)))
 
 
-# Backward-compatible name.
-QuietHandler = AppHandler
-
-
 class ShopServer(ThreadingHTTPServer):
     """Threaded server sized for traffic bursts.
 
@@ -736,6 +843,21 @@ class ShopServer(ThreadingHTTPServer):
     request_queue_size = 1024
     daemon_threads = True
 
+    def server_bind(self):
+        if self.address_family == socket.AF_INET6:
+            # "::" accepts IPv4 too (dual stack): Railway's private network is IPv6
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
+def _public_settings():
+    return {
+        "whatsapp": account.shop_phone(),
+        "delivery_fee": config.DELIVERY_FEE,
+        "free_delivery_threshold": config.FREE_DELIVERY_THRESHOLD,
+        "free_delivery_cities": [config.FREE_DELIVERY_CITY_LATIN, config.FREE_DELIVERY_CITY_AR],
+    }
+
 
 # ---------------------------------------------------------------------------
 # entry point
@@ -743,7 +865,7 @@ class ShopServer(ThreadingHTTPServer):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="fihi-chifae web shop + SQLite API")
+    parser = argparse.ArgumentParser(description="fihi-chifae web shop + MySQL API")
     parser.add_argument(
         "--host",
         default="0.0.0.0",  # noqa: S104  # nosec B104 - container binding
@@ -754,25 +876,30 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     database.init_db()
+    search.start()
+    if ":" in args.host:
+        ShopServer.address_family = socket.AF_INET6
     server = ShopServer((args.host, args.port), AppHandler)
 
-    url = f"http://{args.host}:{args.port}/"
-    print("=" * 64)
-    print(f"  {config.SITE_NAME} ({config.ENV}) is running at: {url}")
-    print(f"  Admin dashboard:   {url}admin.html")
-    print(f"  Data directory:    {config.DATA_DIR}")
-    print(f"  Live database:     {config.DB_FILE}")
-    print(f"  Archive database:  {config.ARCHIVE_DB_FILE}")
-    print(f"  Uploads:           {config.UPLOAD_DIR}")
-    print("  Press Ctrl+C to stop.")
-    print("=" * 64, flush=True)
+    url = f"http://{'[' + args.host + ']' if ':' in args.host else args.host}:{args.port}/"
+    log.info(
+        "server started",
+        extra={
+            "url": url,
+            "env": config.ENV,
+            "mysql": f"{config.MYSQL_HOST}:{config.MYSQL_PORT}/{config.MYSQL_DATABASE}",
+            "storage": config.S3_ENDPOINT or config.UPLOAD_DIR,
+            "search": config.MEILI_URL or "builtin",
+            "fluentd": config.FLUENTD_URL or "off",
+        },
+    )
 
     if args.open:
         webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopped.")
+        log.info("server stopped")
         server.server_close()
 
 

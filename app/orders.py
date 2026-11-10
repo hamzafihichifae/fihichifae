@@ -302,11 +302,16 @@ def reject_order(oid):
 # ---------------------------------------------------------------------------
 
 
-def list_orders(date_from=None, date_to=None):
+def _clean_buyer(buyer):
+    return re.sub(r"\s+", " ", buyer or "").strip()[: config.MAX_FIELD_LEN]
+
+
+def list_orders(date_from=None, date_to=None, buyer=None):
     """Orders (with their lines) whose relevant date falls in [from, to].
 
     Pending orders are matched on the date they were placed, confirmed orders
     on the date they were confirmed - the same date that drives revenue.
+    ``buyer`` keeps only that customer's orders (case-insensitive name).
     """
     for d in (date_from, date_to):
         if d and not _DATE_RE.match(d):
@@ -319,24 +324,83 @@ def list_orders(date_from=None, date_to=None):
     if date_to:
         where.append(f"substr({ref},1,10) <= ?")
         args.append(date_to)
-    # only constant SQL fragments are concatenated; dates are bound parameters
+    buyer = _clean_buyer(buyer)
+    if buyer:
+        where.append("o.buyer = ?")
+        args.append(buyer)
+    # only constant SQL fragments are concatenated; values are bound parameters
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     sql = f"SELECT o.*, {ref} AS ref_date FROM orders o{where_sql}"  # noqa: S608  # nosec B608
     sql += " ORDER BY (o.status='pending') DESC, ref_date DESC"
     with database.live_db() as conn:
         orders = [dict(r) for r in conn.execute(sql, args)]
-        for o in orders:
-            o["items"] = [
-                dict(r)
-                for r in conn.execute(
-                    "SELECT product_id,product_name,cat,price,qty,size FROM order_items"
-                    " WHERE order_id=? ORDER BY id",
-                    (o["id"],),
-                )
-            ]
-            o["subtotal"] = _subtotal(
-                [{"price": i["price"] or 0, "qty": i["qty"] or 0} for i in o["items"]]
-            )
-            o["delivery_fee"] = o["delivery_fee"] or 0
-            o["total"] = round(o["subtotal"] + o["delivery_fee"], 2)
+        lines = {}
+        ids = [o["id"] for o in orders]
+        for start in range(0, len(ids), 500):  # one query per 500 orders, not one per order
+            chunk = ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            for r in conn.execute(
+                "SELECT order_id,product_id,product_name,cat,price,qty,size FROM order_items"  # noqa: S608
+                f" WHERE order_id IN ({marks}) ORDER BY id",  # noqa: S608  # nosec B608
+                chunk,
+            ):
+                item = dict(r)
+                lines.setdefault(item.pop("order_id"), []).append(item)
+    for o in orders:
+        o["items"] = lines.get(o["id"], [])
+        o["subtotal"] = _subtotal(
+            [{"price": i["price"] or 0, "qty": i["qty"] or 0} for i in o["items"]]
+        )
+        o["delivery_fee"] = o["delivery_fee"] or 0
+        o["total"] = round(o["subtotal"] + o["delivery_fee"], 2)
     return orders
+
+
+def customer_summary(buyer):
+    """All-time figures of one customer: order count, first/last order, totals."""
+    buyer = _clean_buyer(buyer)
+    if not buyer:
+        raise StoreError(400, "missing_buyer", "اسم الزبون مطلوب")
+    with database.live_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS orders, SUM(o.status='confirmed') AS confirmed,"
+            " MIN(o.created) AS first_order, MAX(o.created) AS last_order,"
+            " COALESCE(SUM(CASE WHEN o.status='confirmed' THEN COALESCE(o.delivery_fee,0)"
+            "  + COALESCE((SELECT SUM(price*qty) FROM order_items WHERE order_id=o.id),0)"
+            "  END),0) AS confirmed_total"
+            " FROM orders o WHERE o.buyer = ?",
+            (buyer,),
+        ).fetchone()
+    return {
+        "buyer": buyer,
+        "orders": int(row["orders"] or 0),
+        "confirmed": int(row["confirmed"] or 0),
+        "first_order": row["first_order"],
+        "last_order": row["last_order"],
+        "confirmed_total": round(row["confirmed_total"] or 0, 2),
+    }
+
+
+def list_customers(q="", limit=20):
+    """Customers whose name contains ``q`` (autocomplete of the orders filter)."""
+    q = _clean_buyer(q)[:60]
+    like = "%" + re.sub(r"([\\%_])", r"\\\1", q) + "%"
+    with database.live_db() as conn:
+        rows = conn.execute(
+            "SELECT ANY_VALUE(buyer) AS buyer, COUNT(*) AS orders,"
+            " MAX(created) AS last_order,"
+            " SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(phone,'') ORDER BY created DESC"
+            " SEPARATOR '|'), '|', 1) AS phone"
+            " FROM orders WHERE buyer IS NOT NULL AND buyer <> '' AND buyer LIKE ?"
+            " GROUP BY LOWER(buyer) ORDER BY last_order DESC LIMIT ?",
+            (like, int(limit)),
+        ).fetchall()
+    return [
+        {
+            "buyer": r["buyer"],
+            "orders": int(r["orders"]),
+            "phone": r["phone"] or "",
+            "last_order": r["last_order"],
+        }
+        for r in rows
+    ]

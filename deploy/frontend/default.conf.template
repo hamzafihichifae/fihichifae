@@ -1,0 +1,128 @@
+# Rendered at start-up by the nginx image (envsubst): ${PORT}, ${BACKEND_HOST}...
+#
+# Railway: the public domain points at this service only. The backend and the
+# object storage stay on the private network (<service>.railway.internal).
+
+# Cache policy per path (one add_header at server level, so every response
+# keeps the security headers too).
+map $uri $fihi_cache {
+  ~^/api/                    "";
+  ~^/media/(prod|avatar)_     "public, max-age=31536000, immutable";
+  ~^/(media|assets/uploads)/ "public, max-age=86400";
+  ~^/(admin|admin-add)\.html$ "no-store";
+  ~^/assets/admin(-add)?\.js$ "no-store";
+  default                    "no-cache";
+}
+map $http_x_forwarded_proto $fihi_proto {
+  ""      $scheme;
+  default $http_x_forwarded_proto;
+}
+
+server {
+  listen ${PORT};
+  listen [::]:${PORT};
+  server_name _;
+  root /usr/share/nginx/html;
+  include /etc/nginx/conf.d/logging.inc;
+
+  # private-network DNS (Railway: fd12::10, Docker: 127.0.0.11); names are
+  # resolved per request so a restarting service never blocks nginx start-up
+  resolver ${NGINX_RESOLVER} valid=10s ipv6=on;
+  set $backend "${BACKEND_HOST}:${BACKEND_PORT}";
+  set $storage "${STORAGE_HOST}:${STORAGE_WEB_PORT}";
+
+  # the platform edge appends the real client IP to X-Forwarded-For
+  set_real_ip_from 0.0.0.0/0;
+  set_real_ip_from ::/0;
+  real_ip_header X-Forwarded-For;
+
+  add_header Cache-Control $fihi_cache always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Referrer-Policy "no-referrer" always;
+  add_header Cross-Origin-Opener-Policy "same-origin" always;
+  add_header Permissions-Policy "camera=(), microphone=(), geolocation=(self)" always;
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
+
+  location = /healthz {
+    access_log off;
+    default_type text/plain;
+    return 200 "ok";
+  }
+
+  # ---------------------------------------------------------------- API
+  location /api/ {
+    proxy_pass http://$backend;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $fihi_proto;
+    proxy_set_header Connection "";
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+    proxy_buffering on;
+    # the backend sends the same security headers: keep nginx's copy only
+    proxy_hide_header X-Content-Type-Options;
+    proxy_hide_header X-Frame-Options;
+    proxy_hide_header Referrer-Policy;
+    proxy_hide_header Cross-Origin-Opener-Policy;
+    proxy_hide_header Permissions-Policy;
+    proxy_hide_header Strict-Transport-Security;
+    proxy_hide_header Content-Security-Policy;
+  }
+
+  # ------------------------------------------- images (object storage)
+  # every image lives in the bucket; /assets/uploads/ is the pre-MySQL path
+  location ~ ^/(media|assets/uploads)/ {
+    limit_except GET HEAD { deny all; }
+    rewrite ^/(?:media|assets/uploads)/([A-Za-z0-9_.-]+)$ /$1 break;
+    proxy_pass http://$storage;
+    proxy_http_version 1.1;
+    proxy_set_header Host "${STORAGE_BUCKET}.web.garage";
+    proxy_set_header Connection "";
+    proxy_hide_header Cache-Control;
+    proxy_intercept_errors on;
+    error_page 403 404 = @missing;
+  }
+  location @missing {
+    return 404;
+  }
+
+  # -------------------------------------------- admin (session required)
+  location = /_auth {
+    internal;
+    proxy_pass http://$backend/api/v1/admin/session;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $fihi_proto;
+  }
+  location ~ ^/(admin|admin-add)\.html$ {
+    auth_request /_auth;
+    error_page 401 = @login;
+  }
+  location ~ ^/assets/admin(-add)?\.js$ {
+    auth_request /_auth;
+  }
+  location @login {
+    return 302 /admin-login.html?next=$uri;
+  }
+
+  # ---------------------------------------------------- public files
+  location = / {
+    try_files /index.html =404;
+  }
+  location = /favicon.ico {
+    return 301 /media/logo.jpg;
+  }
+  location ~ ^/(index|info|admin-login|admin-reset)\.html$ {
+  }
+  location /assets/ {
+    location ~ /\. { return 404; }
+  }
+  location / {
+    return 404;
+  }
+}

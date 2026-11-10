@@ -39,4 +39,15 @@
   });
   window.addEventListener('hashchange', scrollToHash);
   apply(lang);
+
+  // the shop number is set by the admin (profile panel): refresh every link
+  fetch('/api/v1/settings').then(function (r) { return r.ok ? r.json() : null; }).then(function (st) {
+    var d = st && String(st.whatsapp || '').replace(/\D/g, '');
+    if (!d || d.length < 9) return;
+    var text = d.indexOf('212') === 0 && d.length === 12
+      ? '+212 ' + d.slice(3, 6) + ' ' + d.slice(6, 9) + ' ' + d.slice(9) : '+' + d;
+    document.querySelectorAll('a[href^="https://wa.me/"]').forEach(function (a) { a.href = 'https://wa.me/' + d; });
+    document.querySelectorAll('a[href^="tel:"]').forEach(function (a) { a.href = 'tel:+' + d; });
+    document.querySelectorAll('[data-shop-phone]').forEach(function (el) { el.textContent = text; });
+  }).catch(function () { /* keep the numbers written in the page */ });
 })();

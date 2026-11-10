@@ -83,3 +83,22 @@ input[type=file].input{padding:.35rem;line-height:1.8}
 .modal-actions{display:flex;gap:.5rem;margin-inline-start:auto}
 @media(max-width:560px){.modal-overlay{padding:0;align-items:stretch}.modal-card{max-height:100dvh;border-radius:0}.modal-head,.modal-foot{border-radius:0}}
 .confirm-text{font-size:.92rem;color:var(--body)}
+
+/* ---- admin profile: avatar in the top bar (right edge) + dialog ---- */
+.avatar-btn{width:42px;height:42px;border-radius:50%;overflow:hidden;flex-shrink:0;display:grid;place-items:center;
+  background:#fff;color:var(--green-800);font-weight:900;font-size:1.05rem;border:2px solid rgba(255,255,255,.75);
+  box-shadow:0 2px 8px rgba(0,0,0,.18);transition:transform .15s,border-color .15s}
+.avatar-btn:hover{transform:scale(1.05);border-color:#fff}
+.avatar-btn img,.pf-avatar img{width:100%;height:100%;object-fit:cover}
+.top .brand{margin-inline-end:auto}
+.pf-photo{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:1.1rem}
+.pf-avatar{width:76px;height:76px;border-radius:50%;overflow:hidden;display:grid;place-items:center;flex-shrink:0;
+  background:var(--green-100);color:var(--green-800);font-weight:900;font-size:1.8rem;border:2px solid var(--green-200)}
+.pf-photo-actions{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+.pf-photo-actions label{cursor:pointer}
+.pf-photo-actions .hint{flex-basis:100%}
+.pf-grid{display:grid;gap:.8rem}
+@media(min-width:640px){.pf-grid{grid-template-columns:1fr 1fr}.pf-grid .field:first-child{grid-column:1/-1}}
+.pf-sep{grid-column:1/-1;font-size:.8rem;font-weight:800;color:var(--muted);border-top:1px dashed var(--green-200);padding-top:.7rem;margin-top:.2rem}
+.profile-card{max-width:38rem}
+.pf-current{flex:1 1 14rem;max-width:20rem}

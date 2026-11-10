@@ -51,8 +51,13 @@ class Shopper(HttpUser):
     @task(3)
     def static_assets(self):
         # a returning browser revalidates its cached files (304 when unchanged)
-        for path in ("/assets/style.css?v=8", "/assets/main.js?v=16", "/assets/logo.jpg"):
+        for path in ("/assets/style.css?v=9", "/assets/main.js?v=18", "/media/logo.jpg"):
             self.client.get(path, name="GET /assets/* (static)")
+
+    @task(2)
+    def search(self):
+        query = random.choice(["miel", "honey", "عسل", "زيت أركان", "huile", "the", "amlou", "parfum"])
+        self.client.get("/api/v1/search", params={"q": query}, name="GET /api/v1/search")
 
     @task(1)
     def info_page(self):

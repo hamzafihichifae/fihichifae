@@ -9,7 +9,7 @@
   const DEL_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" stroke-linecap="round"/></svg>';
   const EDIT_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const X_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" stroke-linecap="round"/></svg>';
-  const FALLBACK_IMG = 'assets/cat-default.svg';
+  const FALLBACK_IMG = '/media/cat-default.svg';
 
   let CATS = [];
   let PRODUCTS = [];
@@ -80,12 +80,17 @@
   }
 
   /* ---------------- sizes editor ---------------- */
+  // value, label; a size always reads "<value> <unit>" (e.g. 250 g) whatever the language
+  const UNITS = [['g', 'g · غرام'], ['kg', 'kg · كغ'], ['L', 'L · لتر']];
   function sizeRowHTML(s) {
     s = s || {};
     const unit = s.unit || 'kg';
     return '<div class="size-row" data-size-row>' +
-      '<input type="text" class="input sm sr-size" value="' + esc(s.size != null ? s.size : '') + '" placeholder="الحجم (مثال: 1)" inputmode="decimal" aria-label="الحجم">' +
-      '<select class="input sm sr-unit" aria-label="الوحدة"><option value="kg"' + (unit === 'kg' ? ' selected' : '') + '>كغ (kg)</option><option value="L"' + (unit === 'L' ? ' selected' : '') + '>لتر (L)</option></select>' +
+      '<div class="sr-qty" dir="ltr">' +
+      '<input type="text" class="input sm sr-size" value="' + esc(s.size != null ? s.size : '') + '" placeholder="250" inputmode="decimal" aria-label="الحجم" title="الحجم (مثال: 250)">' +
+      '<select class="input sm sr-unit" aria-label="الوحدة">' + UNITS.map((u) =>
+        '<option value="' + u[0] + '"' + (unit === u[0] ? ' selected' : '') + '>' + u[1] + '</option>').join('') + '</select>' +
+      '</div>' +
       '<input type="number" class="input sm sr-price" value="' + esc(s.price != null ? s.price : '') + '" min="0" step="0.01" placeholder="السعر" aria-label="السعر">' +
       '<button type="button" class="icon-btn danger" data-del-size title="حذف الحجم" aria-label="حذف الحجم">' + X_SVG + '</button>' +
       '</div>';
@@ -193,6 +198,8 @@
       '    <div class="field"><label>الفئة</label><div class="cat-combo"><input type="text" class="input sm e-cat" autocomplete="off" maxlength="60" value="' + esc(catTitle(p.cat)) + '"><div class="combo-dropdown" hidden></div></div></div>' +
       '    <div class="field"><label>سعر 1 كغ / 1 ل</label><input type="number" class="input sm e-price" min="0" step="0.01" value="' + esc(p.sizes_custom ? '' : (p.min != null ? p.min : '')) + '" placeholder="' + (p.sizes_custom ? 'محدد بالأحجام أسفله' : '') + '"></div>' +
       '    <div class="field"><label>صورة جديدة (اختياري)</label><input type="file" class="input sm e-file" accept="image/png,image/jpeg,image/webp,image/gif"></div>' +
+      '    <div class="field"><label>الاسم بالفرنسية (للبحث)</label><input type="text" class="input sm e-name-fr" maxlength="80" dir="ltr" value="' + esc(p.name_fr || '') + '"></div>' +
+      '    <div class="field"><label>الاسم بالإنجليزية (للبحث)</label><input type="text" class="input sm e-name-en" maxlength="80" dir="ltr" value="' + esc(p.name_en || '') + '"></div>' +
       '  </div>' +
       '  <div class="field"><label>الوصف</label><textarea class="input e-desc" maxlength="2000" placeholder="الأصل، طريقة الاستعمال، المميزات…">' + esc(p.description || '') + '</textarea></div>' +
       '  <div class="sizes-box"><div class="sizes-list">' + (sizes.length ? sizes.map(sizeRowHTML).join('') : sizeRowHTML(null)) + '</div>' +
@@ -249,7 +256,8 @@
     try {
       const img = await readFile($('#fFile').files[0]);
       const cat = await ensureCategory(catInput);
-      const body = { name, cat, img, sizes, description: $('#fDesc').value.trim() };
+      const body = { name, cat, img, sizes, description: $('#fDesc').value.trim(),
+        name_fr: $('#fNameFr').value.trim(), name_en: $('#fNameEn').value.trim() };
       if (price !== null && !isNaN(price)) body.price = price;
       await apiJson('/api/v1/products', { method: 'POST', body });
       toast('تمت إضافة « ' + name + ' » إلى « ' + catTitle(cat) + ' ».');
@@ -281,7 +289,8 @@
     try {
       const img = await readFile($('.e-file', row).files[0]);
       const cat = await ensureCategory(catInput);
-      const body = { name, cat, sizes, price: priceRaw === '' ? '' : parseFloat(priceRaw), description: $('.e-desc', row).value.trim() };
+      const body = { name, cat, sizes, price: priceRaw === '' ? '' : parseFloat(priceRaw), description: $('.e-desc', row).value.trim(),
+        name_fr: $('.e-name-fr', row).value.trim(), name_en: $('.e-name-en', row).value.trim() };
       if (img) body.img = img;
       await apiJson('/api/v1/products/' + encodeURIComponent(id), { method: 'PUT', body });
       toast('تم تحديث المنتج.');

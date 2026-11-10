@@ -1,3 +1,4 @@
 # Runtime dependencies (the web server itself is the Python standard library)
 openpyxl==3.1.5   # Excel sales export
 tzdata==2025.2    # Africa/Casablanca time zone data (shop-local dates)
+PyMySQL==1.2.3    # MySQL driver (pure Python, no C build)
