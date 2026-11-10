@@ -1,38 +1,25 @@
 #!/usr/bin/env bash
-# Deploy services to Railway with the right config for each one.
+# Deploy services to Railway, in the given order.
 #
 #   scripts/railway_deploy.sh backend frontend        (or: mysql storage search ...)
 #
-# `railway up` uploads the repo and reads the railway.json at its ROOT (the
-# backend's). To build each service from its own Dockerfile, the service's
-# config is copied over the root railway.json for its upload, then restored.
-# Needs RAILWAY_TOKEN (project token) or `railway login && railway link`.
+# Each service builds its own Dockerfile: scripts/railway_bootstrap.py sets
+# the Dockerfile path, health check and restart policy on every service
+# through the Railway API (Railway no longer accepts railway.json for new
+# services). Needs RAILWAY_TOKEN (project token) or RAILWAY_API_TOKEN plus
+# `railway link`, or `railway login && railway link` locally.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
-config_for() {
-  case "$1" in
-    backend) echo "railway.json" ;;
-    frontend) echo "deploy/frontend/railway.json" ;;
-    mysql) echo "deploy/mysql/railway.json" ;;
-    storage) echo "deploy/garage/railway.json" ;;
-    search) echo "deploy/search/railway.json" ;;
-    *) echo "unknown service '$1' (backend|frontend|mysql|storage|search)" >&2; return 1 ;;
-  esac
-}
 
 [ "$#" -gt 0 ] || set -- backend frontend
 ci_flag=""
 [ -n "${CI:-}" ] && ci_flag="--ci"
 
-backup="$(mktemp)"
-cp railway.json "$backup"
-trap 'cp "$backup" railway.json; rm -f "$backup"' EXIT
-
 for svc in "$@"; do
-  cfg="$(config_for "$svc")"
-  cp "$backup" railway.json
-  [ "$cfg" = "railway.json" ] || cp "$cfg" railway.json
-  echo "==> railway up --service $svc  (config: $cfg)"
+  case "$svc" in
+    backend | frontend | mysql | storage | search) ;;
+    *) echo "unknown service '$svc' (backend|frontend|mysql|storage|search)" >&2; exit 1 ;;
+  esac
+  echo "==> railway up --service $svc"
   railway up --service "$svc" $ci_flag
 done

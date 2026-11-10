@@ -280,7 +280,6 @@ jobs:
             export RAILWAY_API_TOKEN="$TOKEN"
             railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID"
           fi
-          # each service is uploaded with its own railway.json (see the script)
           bash scripts/railway_deploy.sh ${{ steps.bootstrap.outputs.deploy }}
       - name: Wait until the shop answers
         env:

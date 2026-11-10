@@ -37,7 +37,7 @@ project match what the shop needs, adding only what is missing:
 
 | Step | What it does |
 |---|---|
-| services | creates `mysql`, `storage`, `search`, `backend`, `frontend`, each building its own `Dockerfile` / `railway.json`; removes other services **that have no volume** (e.g. the one Railway creates when a repo is linked) |
+| services | creates `mysql`, `storage`, `search`, `backend`, `frontend`, each building its own `Dockerfile`, with its health check and restart policy (set through Railway's API: Railway no longer accepts `railway.json` for new services); removes other services **that have no volume** (e.g. the one Railway creates when a repo is linked) |
 | volumes | `mysql` → `/var/lib/mysql`, `storage` → `/var/lib/garage`, `search` → `/meili_data` |
 | variables | fixed values (hosts, ports, database / bucket names, admin user, WhatsApp number) are kept in sync; services find each other through Railway references (`${{mysql.MYSQL_PASSWORD}}`, `*.railway.internal`) |
 | secrets | MySQL passwords, Garage keys, Meilisearch key and the admin password are generated **once** and stored only in Railway (never in the repo or the logs) |

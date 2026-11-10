@@ -7,7 +7,7 @@ storage Garage S3 (bucket "uploads" = EVERY image; DB stores URLs MEDIA_BASE_URL
 seed/media/* copied to the bucket at start; old assets/... paths rewritten by db.sync_media_urls) | search Meilisearch (app/search.py, built-in fallback) |
 fluentd = LOCAL DEV ONLY (docker driver :24224; daily gzip files, 30 days); not a Railway service.
 Daily Railway cost check: .github/workflows/railway-usage.yml + scripts/railway_usage.py.
-Deploy: automatic on push to main after tests; scripts/railway_bootstrap.py creates services/volumes/vars/secrets/domain, scripts/railway_deploy.sh uploads each service with its own railway.json.
+Deploy: automatic on push to main after tests; scripts/railway_bootstrap.py creates services/volumes/vars/secrets/domain, scripts/railway_deploy.sh runs railway up per service (no railway.json: Railway deprecated it; settings go through the API).
 API v1 under /api/v1 with JSON error envelope; legacy /api/* -> 410; method -> 405; crash -> 500.
 Auth: PBKDF2-HMAC-SHA256 210k, sessions hashed in MySQL (TTL 8h), login throttled 5/15m -> 429.
 Admin profile (avatar circle, top-right of every admin page): username, password, reset e-mail,

@@ -3,7 +3,8 @@
 Run by the CI/CD deploy job before every deploy. It only adds what is missing:
 
 * the five services (mysql, storage, search, backend, frontend), each building
-  its own Dockerfile / railway.json;
+  its own Dockerfile, with its health check / restart policy set through the
+  API (Railway no longer accepts railway.json for new services);
 * their volumes (mysql, storage, search);
 * every variable: fixed values are kept in sync, secrets (passwords, keys) are
   generated ONCE and stored only in Railway, never in the repo or the logs;
@@ -31,28 +32,38 @@ import urllib.request
 
 API = "https://backboard.railway.com/graphql/v2"
 
-# name -> (railway.json, Dockerfile, volume mount or None, folder that triggers a redeploy)
+# name -> (extra settings, Dockerfile, volume mount or None, folder that triggers a redeploy)
 SERVICES = {
     "mysql": (
-        "deploy/mysql/railway.json",
+        {},
         "deploy/mysql/Dockerfile",
         "/var/lib/mysql",
         "deploy/mysql/",
     ),
     "storage": (
-        "deploy/garage/railway.json",
+        {},
         "deploy/garage/Dockerfile",
         "/var/lib/garage",
         "deploy/garage/",
     ),
     "search": (
-        "deploy/search/railway.json",
+        {},
         "deploy/search/Dockerfile",
         "/meili_data",
         "deploy/search/",
     ),
-    "backend": ("railway.json", "Dockerfile", None, None),
-    "frontend": ("deploy/frontend/railway.json", "deploy/frontend/Dockerfile", None, None),
+    "backend": (
+        {"healthcheckPath": "/api/v1/ping", "healthcheckTimeout": 120},
+        "Dockerfile",
+        None,
+        None,
+    ),
+    "frontend": (
+        {"healthcheckPath": "/healthz", "healthcheckTimeout": 60},
+        "deploy/frontend/Dockerfile",
+        None,
+        None,
+    ),
 }
 ORDER = ["mysql", "storage", "search", "backend", "frontend"]
 INFRA = {"mysql", "storage", "search"}
@@ -283,14 +294,21 @@ def ensure_services(project_id, env_id, services, volumes):
             )
             services[name] = data["serviceCreate"]["id"]
             log(f"+ created service '{name}'")
-        cfg, dockerfile, _mount, _folder = SERVICES[name]
+        extra, dockerfile, _mount, _folder = SERVICES[name]
+        settings = {
+            "dockerfilePath": dockerfile,
+            "numReplicas": 1,
+            "restartPolicyType": "ON_FAILURE",
+            "restartPolicyMaxRetries": 10,
+            **extra,
+        }
         gql(
             """mutation($s:String!,$e:String!,$i:ServiceInstanceUpdateInput!){
               serviceInstanceUpdate(serviceId:$s, environmentId:$e, input:$i) }""",
             {
                 "s": services[name],
                 "e": env_id,
-                "i": {"railwayConfigFile": cfg, "dockerfilePath": dockerfile},
+                "i": settings,
             },
         )
 
