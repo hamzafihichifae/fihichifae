@@ -535,8 +535,10 @@ def ensure_email():
         # Resend's shared address
         print(f"::warning title=Resend domain not managed::{exc}", flush=True)
         return env
+    # the backend sends from the shop domain and falls back to Resend's shared
+    # sender by itself while the domain is not verified yet
+    env["FIHI_EMAIL_FROM"] = SENDER.format(zone=ZONE)
     if domain.get("status") == "verified":
-        env["FIHI_EMAIL_FROM"] = SENDER.format(zone=ZONE)
         return env
     records = resend_records(domain)
     if os.environ.get("CLOUDFLARE_API_TOKEN"):
@@ -546,7 +548,7 @@ def ensure_email():
         print(f"::warning title=Add these e-mail DNS records in Cloudflare::{lines}")
     try:
         resend("POST", f"/domains/{found['id']}/verify")
-        log(f"~ Resend verification of {ZONE} requested (sender switches once verified)")
+        log(f"~ Resend verification of {ZONE} requested")
     except RailwayError as exc:
         print(f"::warning title=Resend verification::{exc}", flush=True)
     return env

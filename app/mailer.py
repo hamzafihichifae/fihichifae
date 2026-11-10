@@ -52,12 +52,19 @@ def _reset_body(reset_link):
 
 
 def _send_resend(to_email, subject, html):
-    payload = {
-        "from": config.EMAIL_FROM or RESEND_FALLBACK_FROM,
-        "to": [to_email],
-        "subject": subject,
-        "html": html,
-    }
+    sender = config.EMAIL_FROM or RESEND_FALLBACK_FROM
+    status = _post_resend(sender, to_email, subject, html)
+    if status == 403 and sender != RESEND_FALLBACK_FROM:
+        # the shop domain is not verified at Resend yet: use the shared sender
+        # meanwhile (switches back by itself once the domain is verified)
+        log.warning("shop domain not verified at Resend yet: using the shared sender")
+        status = _post_resend(RESEND_FALLBACK_FROM, to_email, subject, html)
+    return status == 200
+
+
+def _post_resend(sender, to_email, subject, html):
+    """POST one e-mail; returns 200 when accepted, else the HTTP status (0: network)."""
+    payload = {"from": sender, "to": [to_email], "subject": subject, "html": html}
     req = urllib.request.Request(  # noqa: S310 - fixed https URL
         RESEND_URL,
         data=json.dumps(payload).encode("utf-8"),
@@ -71,16 +78,17 @@ def _send_resend(to_email, subject, html):
         with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 - fixed https URL
             msg_id = json.load(resp).get("id")
         log.info("password-reset e-mail sent", extra={"to": to_email, "id": msg_id})
-        return True
+        return 200
     except urllib.error.HTTPError as exc:
-        detail = exc.read()[:300].decode("utf-8", "replace")
+        detail = exc.read()[:300].decode("utf-8", "replace") if exc.fp else ""
         log.error(
             "password-reset e-mail refused by Resend",
-            extra={"to": to_email, "status": exc.code, "error": detail},
+            extra={"to": to_email, "from": sender, "status": exc.code, "error": detail},
         )
+        return exc.code
     except (urllib.error.URLError, OSError, ValueError) as exc:
         log.error("password-reset e-mail failed", extra={"to": to_email, "error": str(exc)})
-    return False
+    return 0
 
 
 def _send_smtp(to_email, subject, html):

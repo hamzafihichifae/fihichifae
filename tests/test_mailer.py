@@ -78,3 +78,20 @@ def test_placeholder_reset_address_is_replaced_but_a_chosen_one_is_kept():
         database.set_meta(conn, "admin_email", "owner@example.com")
         database.init_admin(conn)
         assert database.get_reset_email(conn) == "owner@example.com"
+
+
+def test_unverified_shop_domain_falls_back_to_the_shared_sender(monkeypatch):
+    senders = []
+
+    def fake_urlopen(req, timeout=None):
+        sender = json.loads(req.data)["from"]
+        senders.append(sender)
+        if "fihichifae.com" in sender:
+            raise mailer.urllib.error.HTTPError(req.full_url, 403, "not verified", {}, None)
+        return _Resp({"id": "msg_2"})
+
+    monkeypatch.setattr(config, "RESEND_API_KEY", "re_test")
+    monkeypatch.setattr(config, "EMAIL_FROM", "Fihi Chifae <no-reply@fihichifae.com>")
+    monkeypatch.setattr(mailer.urllib.request, "urlopen", fake_urlopen)
+    assert mailer.send_password_reset("owner@example.com", "https://shop/r")
+    assert senders == ["Fihi Chifae <no-reply@fihichifae.com>", mailer.RESEND_FALLBACK_FROM]
