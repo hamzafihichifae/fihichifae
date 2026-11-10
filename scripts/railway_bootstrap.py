@@ -398,6 +398,37 @@ def to_deploy(services, status, changed):
     return out
 
 
+DEPLOY_TOKEN_PREFIX = "ci-deploy"  # noqa: S105 - a name prefix, not a secret
+
+
+def delete_deploy_tokens(project_id):
+    """Remove the short-lived CLI tokens this script created on earlier runs."""
+    data = gql(
+        "query($p:String!){ projectTokens(projectId:$p, first:100){ edges { node { id name } } } }",
+        {"p": project_id},
+    )
+    for e in data["projectTokens"]["edges"]:
+        if e["node"]["name"].startswith(DEPLOY_TOKEN_PREFIX):
+            gql("mutation($id:String!){ projectTokenDelete(id:$id) }", {"id": e["node"]["id"]})
+
+
+def create_deploy_token(project_id, env_id):
+    """A project token for the Railway CLI (which rejects workspace tokens).
+
+    Written to DEPLOY_TOKEN_FILE (never to the logs or step outputs) and
+    deleted by `--cleanup` at the end of the job, or on the next run.
+    """
+    delete_deploy_tokens(project_id)
+    name = f"{DEPLOY_TOKEN_PREFIX}-{os.environ.get('GITHUB_RUN_ID', 'local')}"
+    token = gql(
+        "mutation($i:ProjectTokenCreateInput!){ projectTokenCreate(input:$i) }",
+        {"i": {"projectId": project_id, "environmentId": env_id, "name": name}},
+    )["projectTokenCreate"]
+    if os.environ.get("GITHUB_ACTIONS"):
+        print(f"::add-mask::{token}", flush=True)
+    return token
+
+
 def main():
     if not (os.environ.get("RAILWAY_TOKEN") or os.environ.get("RAILWAY_API_TOKEN")):
         sys.exit("::error::add the RAILWAY_TOKEN secret (repo Settings -> Secrets -> Actions)")
@@ -405,6 +436,11 @@ def main():
     changed = "ALL" if raw == "ALL" else [line.strip() for line in raw.splitlines() if line.strip()]
 
     project_id, env_id, (cli_kind, cli_secret) = find_project()
+    if "--cleanup" in sys.argv:
+        if AUTH["kind"] == "account":
+            delete_deploy_tokens(project_id)
+            log("temporary deploy token removed")
+        return
     services, status, volumes = load_state(project_id, env_id)
     ensure_services(project_id, env_id, services, volumes)
     ensure_volumes(project_id, env_id, services, volumes)
@@ -412,17 +448,22 @@ def main():
     url = ensure_domain(project_id, env_id, services)
     deploy = to_deploy(services, status, changed)
 
+    token_file = os.environ.get("DEPLOY_TOKEN_FILE")
+    if token_file:
+        if cli_kind == "project":
+            token = os.environ[cli_secret]
+        else:
+            token = create_deploy_token(project_id, env_id)
+            log("temporary project token created for the Railway CLI")
+        with open(token_file, "w", encoding="utf-8") as fh:
+            fh.write(token)
+
     log(f"deploy: {' '.join(deploy)}")
     log(f"shop:   {url}")
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
         with open(out, "a", encoding="utf-8") as fh:
             fh.write(f"deploy={' '.join(deploy)}\nurl={url}\n")
-            # which secret the CLI must use (the name only, never the value)
-            fh.write(
-                f"cli_kind={cli_kind}\ncli_secret={cli_secret}\n"
-                f"project_id={project_id}\nenvironment_id={env_id}\n"
-            )
 
 
 if __name__ == "__main__":

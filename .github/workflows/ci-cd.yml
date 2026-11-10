@@ -260,31 +260,29 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           CHANGED_FILES: ${{ steps.changes.outputs.files }}
+          # project token for the Railway CLI (temporary one when only an
+          # account/workspace token was given); never printed
+          DEPLOY_TOKEN_FILE: ${{ runner.temp }}/railway-deploy-token
         run: python scripts/railway_bootstrap.py
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - name: Deploy (${{ steps.bootstrap.outputs.deploy }})
         env:
-          # the secret the setup step found usable (it reports the name, not the value)
-          TOKEN: ${{ steps.bootstrap.outputs.cli_secret == 'RAILWAY_API_TOKEN' && secrets.RAILWAY_API_TOKEN || secrets.RAILWAY_TOKEN }}
-          KIND: ${{ steps.bootstrap.outputs.cli_kind }}
-          PROJECT_ID: ${{ steps.bootstrap.outputs.project_id }}
-          ENVIRONMENT_ID: ${{ steps.bootstrap.outputs.environment_id }}
+          DEPLOY_TOKEN_FILE: ${{ runner.temp }}/railway-deploy-token
         run: |
           npm install -g @railway/cli
-          if [ "$KIND" = "project" ]; then
-            export RAILWAY_TOKEN="$TOKEN"
-          else
-            # account token: link this checkout to the project first
-            export RAILWAY_API_TOKEN="$TOKEN"
-            if ! railway link --project "$PROJECT_ID" --environment "$ENVIRONMENT_ID" > link.log 2>&1; then
-              cat link.log
-              echo "::error title=railway link failed::$(tail -n 15 link.log | sed ':a;N;$!ba;s/\n/%0A/g')"
-              exit 1
-            fi
-          fi
+          RAILWAY_TOKEN="$(cat "$DEPLOY_TOKEN_FILE")"
+          export RAILWAY_TOKEN
           bash scripts/railway_deploy.sh ${{ steps.bootstrap.outputs.deploy }}
+      - name: Remove the temporary deploy token
+        if: always() && steps.bootstrap.outcome != 'skipped'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+        run: |
+          rm -f "${{ runner.temp }}/railway-deploy-token"
+          python scripts/railway_bootstrap.py --cleanup || true
       - name: Wait until the shop answers
         env:
           URL: ${{ steps.bootstrap.outputs.url }}
