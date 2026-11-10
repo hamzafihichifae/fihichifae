@@ -70,7 +70,12 @@ INFRA = {"mysql", "storage", "search"}
 FRONTEND_PORT = 8080
 # The shop's own domain (its Cloudflare zone); the first one is the main address.
 ZONE = os.environ.get("FIHI_DOMAIN", "fihichifae.com")
-CUSTOM_DOMAINS = [ZONE, "www." + ZONE] if ZONE else []
+# Railway Hobby allows one custom domain per service: only the main one.
+# Extra ones (comma separated FIHI_EXTRA_DOMAINS, e.g. www.fihichifae.com) are
+# attempted, and only warn when the plan refuses them.
+CUSTOM_DOMAINS = ([ZONE] if ZONE else []) + [
+    d.strip() for d in os.environ.get("FIHI_EXTRA_DOMAINS", "").split(",") if d.strip()
+]
 
 
 def _secret(nbytes):
@@ -473,22 +478,29 @@ def ensure_custom_domains(project_id, env_id, services):
     found = gql(q, {"p": project_id, "e": env_id, "s": sid})["domains"]["customDomains"]
     current = {d["domain"]: d for d in found}
     records = []
-    for domain in CUSTOM_DOMAINS:
+    for index, domain in enumerate(CUSTOM_DOMAINS):
         if domain not in current:
-            current[domain] = gql(
-                "mutation($i:CustomDomainCreateInput!){ customDomainCreate(input:$i){ domain "
-                + _CUSTOM_STATUS
-                + " } }",
-                {
-                    "i": {
-                        "domain": domain,
-                        "projectId": project_id,
-                        "environmentId": env_id,
-                        "serviceId": sid,
-                        "targetPort": FRONTEND_PORT,
-                    }
-                },
-            )["customDomainCreate"]
+            try:
+                created = gql(
+                    "mutation($i:CustomDomainCreateInput!){ customDomainCreate(input:$i){ domain "
+                    + _CUSTOM_STATUS
+                    + " } }",
+                    {
+                        "i": {
+                            "domain": domain,
+                            "projectId": project_id,
+                            "environmentId": env_id,
+                            "serviceId": sid,
+                            "targetPort": FRONTEND_PORT,
+                        }
+                    },
+                )["customDomainCreate"]
+            except RailwayError as exc:
+                if index == 0:
+                    raise
+                print(f"::warning title={domain} not attached::{exc}", flush=True)
+                continue
+            current[domain] = created
             log(f"+ custom domain {domain} on 'frontend'")
         records += wanted_records(current[domain].get("status") or {}, ZONE)
     if os.environ.get("CLOUDFLARE_API_TOKEN"):

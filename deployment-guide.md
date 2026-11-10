@@ -54,7 +54,8 @@ changed), the job waits until the shop answers and shows its URL on the run page
   token; also used by the daily cost check).
 
 **Own domain (`fihichifae.com`, Cloudflare)**: the setup step attaches
-`fihichifae.com` and `www.fihichifae.com` to `frontend` and writes the DNS
+`fihichifae.com` to `frontend` (the Hobby plan allows one custom domain per
+service; extra ones can be listed in `FIHI_EXTRA_DOMAINS` after an upgrade) and writes the DNS
 records Railway asks for into Cloudflare (CNAME to the Railway domain + the
 `_railway-verify` TXT, *DNS only* so Railway issues the HTTPS certificate).
 Needs the repo secret **`CLOUDFLARE_API_TOKEN`** (Cloudflare → My Profile → API
